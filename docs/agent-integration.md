@@ -18,6 +18,16 @@ amy_cli / amy_mcp 会读出 token 并在每个请求里带 `X-Amy-Token` 头—�
 - `auto`：小文件自动放行；发送总量超过 `autoApproveBytes`（默认 32MB）仍需确认。
   远程（主控）指令不受 auto 豁免——永远需确认。
 
+## 安全隔离（目录白名单）
+
+agent 发起的 `send` / `plans` 只能读取白名单目录里的文件：配置目录 + 应用自己的
+暂存目录与接收目录（始终允许）。首次运行自动种子 `~/Downloads`、`~/Documents`。
+
+- 非严格模式：目录外文件照常发送，但强制弹本机审批卡（即使 auto 模式也一样）
+- 严格模式：目录外文件直接 403，不给审批机会
+- 路径判定前会规范化并解析符号链接，`..` 逃逸和软链绕过都拦得住
+- 只对本机可调（不在主控远程白名单内）
+
 | 端点 | 说明 |
 | --- | --- |
 | `GET /identity` | 本机指纹/别名/端口/接收目录 |
@@ -29,6 +39,7 @@ amy_cli / amy_mcp 会读出 token 并在每个请求里带 `X-Amy-Token` 头—�
 | `GET` `POST` `DELETE /plans` | 计划发送列表 / 新建 / 取消 |
 | `GET` `POST /policy` | AI 策略读/改（mode: off/ask/auto、autoApproveMB、allowRemoteControl、rotate） |
 | `GET /actions` | 待审批的 AI 操作列表（批准/拒绝只能在 app UI 点击——agent 不可自批） |
+| `GET` `POST /scope` | 安全隔离：白名单目录读/改（`scope` 仅本机） |
 | `GET /files` | 接收目录里最近的文件（远程调用需成员批准） |
 | `POST /remote-send` `{member, peer, paths, token?}` | 主控：指挥成员设备发送自己的文件 |
 | `POST /remote-files` `{member, token?}` | 主控：列出成员设备的文件（成员批准后才返回） |
@@ -46,6 +57,9 @@ dart run bin/amy_cli.dart plan "iPhone 17" f.zip --at 2026-10-05T09:00:00
 dart run bin/amy_cli.dart plans                      # 计划列表
 dart run bin/amy_cli.dart offers                     # 待确认的传入
 dart run bin/amy_cli.dart answer <id> accept         # 代用户接受
+dart run bin/amy_cli.dart scope                       # 看白名单
+dart run bin/amy_cli.dart scope add ~/Sync            # 加目录
+dart run bin/amy_cli.dart scope strict on             # 严格模式
 ```
 
 ## MCP server（stdio，协议 2025-06-18）

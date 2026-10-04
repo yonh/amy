@@ -10,6 +10,7 @@
 //   amy_list_offers                   待确认的传入文件
 //   amy_answer_offer {messageId, accept}
 //   amy_policy {mode?, autoApproveMB?, allowRemoteControl?, rotate?}  AI 策略读/改
+//   amy_scope {add?, remove?, strict?}                     agent 可读目录白名单
 //   amy_list_actions                    AI 待审批（批准只能在 app UI 里点）
 //   amy_remote_send {member, peer, paths[], token?}  指挥成员设备发送
 //   amy_remote_files {member, token?}  列出成员设备文件（需成员批准）
@@ -140,6 +141,18 @@ const _tools = [
     },
   },
   {
+    'name': 'amy_scope',
+    'description': '查看或修改 agent 可读目录白名单（安全隔离）：无参数查看；add 添加目录；remove 移除；strict true 目录外一律拒绝、false 目录外逐次确认',
+    'inputSchema': {
+      'type': 'object',
+      'properties': {
+        'add': {'type': 'string', 'description': '加入白名单的目录路径'},
+        'remove': {'type': 'string'},
+        'strict': {'type': 'boolean'},
+      },
+    },
+  },
+  {
     'name': 'amy_remote_files',
     'description': '列出一台成员设备接收目录里的文件；成员设备会收到审批卡，批准后才返回清单',
     'inputSchema': {
@@ -265,6 +278,12 @@ Future<Object?> _callTool(
       return patch.isEmpty ? c.get('policy') : c.post('policy', patch);
     case 'amy_list_actions':
       return c.get('actions');
+    case 'amy_scope':
+      final patch = <String, dynamic>{};
+      for (final k in ['add', 'remove', 'strict']) {
+        if (a.containsKey(k)) patch[k] = a[k];
+      }
+      return patch.isEmpty ? c.get('scope') : c.post('scope', patch);
     case 'amy_remote_send':
       return c.post('remote-send', {
         'member': a['member'],

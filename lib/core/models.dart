@@ -166,6 +166,45 @@ class AiPolicy {
       );
 }
 
+/// Filesystem isolation for agent-initiated sends: paths must resolve
+/// inside one of [dirs] (or the app's own staging/download dirs, which
+/// are always allowed).
+class SecurityScope {
+  SecurityScope({List<String>? dirs, this.strict = false})
+      : dirs = dirs ?? <String>[];
+
+  /// Absolute directory paths agents may read from. A leading `~` is
+  /// expanded to the user's home dir.
+  List<String> dirs;
+
+  /// true: out-of-scope paths are refused outright (403).
+  /// false: they pop a local approval card instead.
+  bool strict;
+
+  Map<String, dynamic> toJson() => {'dirs': dirs, 'strict': strict};
+
+  factory SecurityScope.fromJson(Map<String, dynamic>? j) => SecurityScope(
+        dirs: (j?['dirs'] as List?)
+            ?.map((e) => e as String)
+            .where((e) => e.isNotEmpty)
+            .toList(),
+        strict: j?['strict'] as bool? ?? false,
+      );
+}
+
+/// Lexical containment test (pure — symlinks should be resolved by the
+/// caller before this). [path] and every entry of [roots] are expected to
+/// be absolute and normalized.
+bool pathWithinRoots(String path, List<String> roots) {
+  final p = path.replaceAll('//', '/');
+  for (final r in roots) {
+    if (r.isEmpty) continue;
+    final root = r.endsWith('/') ? r.substring(0, r.length - 1) : r;
+    if (p == root || p.startsWith('$root/')) return true;
+  }
+  return false;
+}
+
 FileKind fileKindFor(String name) {
   final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
   const images = {

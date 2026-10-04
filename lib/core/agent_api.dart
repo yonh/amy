@@ -103,6 +103,13 @@ class AgentApi {
           });
         case ('POST', 'policy'):
           await _setPolicy(req);
+        case ('GET', 'scope'):
+          _json(req, 200, {
+            'scope': engine.securityScope.toJson(),
+            'roots': await engine.allowedRoots(),
+          });
+        case ('POST', 'scope'):
+          await _setScope(req);
         case ('POST', 'remote-send'):
           await _remoteSend(req);
         case ('POST', 'remote-files'):
@@ -128,9 +135,10 @@ class AgentApi {
     String label,
     int bytes, {
     required bool remote,
+    bool forceConfirm = false,
   }) async {
-    final ok =
-        await engine.agentApprove(kind, label, bytes, remote: remote);
+    final ok = await engine.agentApprove(kind, label, bytes,
+        remote: remote, forceConfirm: forceConfirm);
     if (!ok) {
       _json(req, 403, {
         'error': 'action denied',
@@ -157,6 +165,8 @@ class AgentApi {
       _json(req, 400, {'error': materialized.error});
       return;
     }
+    final fs = materialized.files!;
+    if (!await _checkScope(req, fs)) return;
     if (!peer.online) {
       _json(req, 409, {
         'error': 'peer offline',
@@ -164,16 +174,51 @@ class AgentApi {
       });
       return;
     }
-    final fs = materialized.files!;
     final total = fs.fold(0, (s, f) => s + f.size);
     final names = fs.map((f) => f.name).join(', ');
     final who = remote ? '主控设备' : 'agent';
     if (!await _gate(req, 'send', '$who 请求发送 $names 给 ${peer.alias}',
-        total, remote: remote)) {
+        total, remote: remote, forceConfirm: _outOfScope.isNotEmpty)) {
       return;
     }
     final msg = await engine.sendFiles(peer, fs);
     _json(req, 200, {'message': msg.toJson()});
+  }
+
+  /// Basenames of the paths rejected by the last [_checkScope] call.
+  List<String> _outOfScope = [];
+
+  /// Filesystem isolation: every file must resolve inside an allowed
+  /// directory. Strict scope → deny outright; otherwise the send gate
+  /// gets forceConfirm so `auto` mode still asks when files sit outside
+  /// the whitelist. Returns false with the response already written.
+  Future<bool> _checkScope(HttpRequest req, List<TransferFile> fs) async {
+    _outOfScope = [];
+    final roots = await engine.allowedRoots();
+    for (final f in fs) {
+      final p = f.path ?? '';
+      // Staged files always live inside the app's own staging root.
+      if (!pathWithinRoots(_canon(p), roots)) {
+        _outOfScope.add(f.name);
+      }
+    }
+    if (_outOfScope.isNotEmpty && engine.securityScope.strict) {
+      _json(req, 403, {
+        'error': 'files outside allowed directories',
+        'files': _outOfScope,
+        'hint': '安全隔离为严格模式 — 将该目录加入白名单或放宽模式',
+      });
+      return false;
+    }
+    return true;
+  }
+
+  String _canon(String path) {
+    var p = File(path).absolute.path;
+    try {
+      p = File(p).resolveSymbolicLinksSync();
+    } catch (_) {}
+    return p;
   }
 
   _Materialized _materialize(Map<String, dynamic> j) {
@@ -321,9 +366,11 @@ class AgentApi {
         return;
       }
     }
+    if (!await _checkScope(req, fs)) return;
     final total = fs.fold(0, (s, f) => s + f.size);
     if (!await _gate(req, 'plan',
-        'agent 请求创建计划发送给 ${peer.alias}', total, remote: false)) {
+        'agent 请求创建计划发送给 ${peer.alias}', total, remote: false,
+        forceConfirm: _outOfScope.isNotEmpty)) {
       return;
     }
     final plan = engine.createPlan(peer, fs.map((f) => f.path!).toList(),
@@ -369,6 +416,33 @@ class AgentApi {
     _json(req, 200, {
       'policy': p.toPublicJson(),
       'remoteToken': p.remoteToken,
+    });
+  }
+
+  /// Adjusts the filesystem isolation whitelist (local callers only).
+  Future<void> _setScope(HttpRequest req) async {
+    final j = jsonDecode(await utf8.decodeStream(req)) as Map<String, dynamic>;
+    final s = engine.securityScope;
+    if (j['dirs'] is List) {
+      s.dirs = (j['dirs'] as List)
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
+    }
+    if (j['add'] is String) {
+      final d = (j['add'] as String).trim();
+      if (d.isNotEmpty && !s.dirs.contains(d)) s.dirs.add(d);
+    }
+    if (j['remove'] is String) {
+      s.dirs.remove(j['remove']);
+    }
+    if (j.containsKey('strict')) {
+      s.strict = j['strict'] == true;
+    }
+    await engine.setSecurityScope(s);
+    _json(req, 200, {
+      'scope': s.toJson(),
+      'roots': await engine.allowedRoots(),
     });
   }
 

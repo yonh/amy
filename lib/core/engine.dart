@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p2;
 
 import 'agent_api.dart';
 import 'discovery.dart';
@@ -62,6 +63,9 @@ class TransferEngine extends ChangeNotifier {
   /// Leader-side: member fingerprint -> remote Bearer token.
   Map<String, String> _remoteTokens = {};
 
+  /// Filesystem isolation for agent sends (persisted in SharedPreferences).
+  SecurityScope securityScope = SecurityScope();
+
   /// Pending AI/agent actions awaiting the user's tap.
   final _approvals = <String, AgentAction>{};
 
@@ -93,6 +97,7 @@ class TransferEngine extends ChangeNotifier {
     await discovery.start();
     aiPolicy = await loadAiPolicy();
     _remoteTokens = await loadRemoteTokens();
+    securityScope = await loadSecurityScopeOrSeed();
     identity.agentCapable = aiPolicy.allowRemoteControl;
     _agentToken = randomId(16);
     unawaited(_writeAgentEndpoint());
@@ -316,24 +321,65 @@ class TransferEngine extends ChangeNotifier {
     await saveRemoteTokens(_remoteTokens);
   }
 
+  Future<void> setSecurityScope(SecurityScope s) async {
+    securityScope = s;
+    await saveSecurityScope(s);
+    notifyListeners();
+  }
+
+  /// Directories agent sends may read from: the configured scope dirs
+  /// (with `~` expanded) plus the app's own staging and download dirs,
+  /// which are always allowed so staged/received files can be re-sent.
+  Future<List<String>> allowedRoots() async {
+    final home =
+        Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
+    final roots = <String>[];
+    for (final d in securityScope.dirs) {
+      var e = d.trim();
+      if (e.isEmpty) continue;
+      if (e.startsWith('~') && home != null) {
+        e = home + e.substring(1);
+      }
+      roots.add(_canon(e));
+    }
+    roots.add(_canon((await files.stagingDir()).path));
+    roots.add(_canon(downloads.path));
+    return roots.toSet().toList();
+  }
+
+  /// True when [path] resolves inside an allowed root.
+  Future<bool> pathInScope(String path) async {
+    return pathWithinRoots(_canon(path), await allowedRoots());
+  }
+
+  String _canon(String path) {
+    var p = p2.normalize(File(path).absolute.path);
+    try {
+      p = File(p).resolveSymbolicLinksSync();
+    } catch (_) {}
+    return p;
+  }
+
   /// Decides whether an agent action may proceed.
   ///  - remote (leader-instructed) calls ALWAYS need the user's tap;
   ///  - mode off refuses outright;
   ///  - ask requires a tap;
-  ///  - auto passes unless the transfer exceeds autoApproveBytes.
+  ///  - auto passes unless the transfer exceeds autoApproveBytes or
+  ///    [forceConfirm] is set (e.g. an out-of-scope path).
   /// Approval waits up to 60s; unanswered = denied.
   Future<bool> agentApprove(
     String kind,
     String label,
     int bytes, {
     required bool remote,
+    bool forceConfirm = false,
   }) async {
     if (aiPolicy.mode == AiMode.off) return false;
     if (remote ||
         aiPolicy.mode == AiMode.ask ||
         (aiPolicy.mode == AiMode.auto &&
-            kind == 'send' &&
-            bytes > aiPolicy.autoApproveBytes)) {
+            ((forceConfirm) ||
+                (kind == 'send' && bytes > aiPolicy.autoApproveBytes)))) {
       final a = AgentAction(
         id: randomId(),
         kind: kind,

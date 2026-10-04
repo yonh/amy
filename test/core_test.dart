@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:amy/core/files.dart';
 import 'package:amy/core/models.dart';
+import 'package:path/path.dart' as p;
 import 'package:amy/core/protocol.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -115,6 +116,27 @@ void main() {
       // Public view never leaks the token value.
       expect(p.toPublicJson().containsKey('remoteToken'), isFalse);
       expect(p.toPublicJson()['remoteTokenSet'], isTrue);
+    });
+  });
+
+  group('SecurityScope', () {
+    test('json round-trip preserves dirs and strict flag', () {
+      final s = SecurityScope(dirs: ['/a', '/b/c'], strict: true);
+      final r = SecurityScope.fromJson(s.toJson());
+      expect(r.dirs, ['/a', '/b/c']);
+      expect(r.strict, isTrue);
+    });
+
+    test('pathWithinRoots matches inside dirs, not siblings or parents', () {
+      const roots = ['/home/u/Downloads', '/data/staged'];
+      expect(pathWithinRoots('/home/u/Downloads/x.txt', roots), isTrue);
+      expect(pathWithinRoots('/data/staged', roots), isTrue);
+      expect(pathWithinRoots('/home/u/Downloads2/x', roots), isFalse);
+      expect(pathWithinRoots('/home/u/x', roots), isFalse);
+      expect(pathWithinRoots('/etc/passwd', roots), isFalse);
+      // Callers normalize first — `..` collapsing escapes the root.
+      expect(pathWithinRoots(
+          p.normalize('/home/u/Downloads/../secret'), roots), isFalse);
     });
   });
 }
