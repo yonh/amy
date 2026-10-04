@@ -166,7 +166,8 @@ class AgentApi {
       return;
     }
     final fs = materialized.files!;
-    if (!await _checkScope(req, fs)) return;
+    final denied = await _checkScope(req, fs);
+    if (denied == null) return;
     if (!peer.online) {
       _json(req, 409, {
         'error': 'peer offline',
@@ -178,47 +179,35 @@ class AgentApi {
     final names = fs.map((f) => f.name).join(', ');
     final who = remote ? '主控设备' : 'agent';
     if (!await _gate(req, 'send', '$who 请求发送 $names 给 ${peer.alias}',
-        total, remote: remote, forceConfirm: _outOfScope.isNotEmpty)) {
+        total, remote: remote, forceConfirm: denied.isNotEmpty)) {
       return;
     }
     final msg = await engine.sendFiles(peer, fs);
     _json(req, 200, {'message': msg.toJson()});
   }
 
-  /// Basenames of the paths rejected by the last [_checkScope] call.
-  List<String> _outOfScope = [];
-
   /// Filesystem isolation: every file must resolve inside an allowed
-  /// directory. Strict scope → deny outright; otherwise the send gate
-  /// gets forceConfirm so `auto` mode still asks when files sit outside
-  /// the whitelist. Returns false with the response already written.
-  Future<bool> _checkScope(HttpRequest req, List<TransferFile> fs) async {
-    _outOfScope = [];
-    final roots = await engine.allowedRoots();
+  /// directory. Returns the out-of-scope basenames for this request
+  /// (possibly empty), or null after writing a 403 in strict mode.
+  /// Unresolvable paths count as outside — fail-safe.
+  Future<List<String>?> _checkScope(
+      HttpRequest req, List<TransferFile> fs) async {
+    final denied = <String>[];
     for (final f in fs) {
-      final p = f.path ?? '';
       // Staged files always live inside the app's own staging root.
-      if (!pathWithinRoots(_canon(p), roots)) {
-        _outOfScope.add(f.name);
+      if (!await engine.pathInScope(f.path ?? '')) {
+        denied.add(f.name);
       }
     }
-    if (_outOfScope.isNotEmpty && engine.securityScope.strict) {
+    if (denied.isNotEmpty && engine.securityScope.strict) {
       _json(req, 403, {
         'error': 'files outside allowed directories',
-        'files': _outOfScope,
+        'files': denied,
         'hint': '安全隔离为严格模式 — 将该目录加入白名单或放宽模式',
       });
-      return false;
+      return null;
     }
-    return true;
-  }
-
-  String _canon(String path) {
-    var p = File(path).absolute.path;
-    try {
-      p = File(p).resolveSymbolicLinksSync();
-    } catch (_) {}
-    return p;
+    return denied;
   }
 
   _Materialized _materialize(Map<String, dynamic> j) {
@@ -366,15 +355,16 @@ class AgentApi {
         return;
       }
     }
-    if (!await _checkScope(req, fs)) return;
+    final denied = await _checkScope(req, fs);
+    if (denied == null) return;
     final total = fs.fold(0, (s, f) => s + f.size);
     if (!await _gate(req, 'plan',
         'agent 请求创建计划发送给 ${peer.alias}', total, remote: false,
-        forceConfirm: _outOfScope.isNotEmpty)) {
+        forceConfirm: denied.isNotEmpty)) {
       return;
     }
     final plan = engine.createPlan(peer, fs.map((f) => f.path!).toList(),
-        runAt: runAt?.toLocal());
+        runAt: runAt?.toLocal(), agent: true);
     _json(req, 200, {'plan': plan.toJson()});
   }
 

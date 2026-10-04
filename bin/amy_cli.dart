@@ -116,7 +116,9 @@ Future<int> main(List<String> args) async {
             if (rest.length < 2) return _err('用法: scope remove <目录>');
             _print(await api.post('scope', {'remove': _dirArg(rest[1])}));
           case 'strict':
-            if (rest.length < 2) return _err('用法: scope strict on|off');
+            if (rest.length < 2 || (rest[1] != 'on' && rest[1] != 'off')) {
+              return _err('用法: scope strict on|off');
+            }
             _print(await api.post('scope', {'strict': rest[1] == 'on'}));
           default:
             return _err('用法: scope [add|remove|strict] ...');

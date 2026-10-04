@@ -183,13 +183,15 @@ class TransferEngine extends ChangeNotifier {
 
   /// Schedules a send: at [runAt] (null = the next time the peer is online).
   /// The plan stays pending if the peer is offline when due.
-  SendPlan createPlan(Peer peer, List<String> filePaths, {DateTime? runAt}) {
+  SendPlan createPlan(Peer peer, List<String> filePaths,
+      {DateTime? runAt, bool agent = false}) {
     final p = SendPlan(
       id: randomId(),
       peerFingerprint: peer.fingerprint,
       peerAlias: peer.alias,
       filePaths: List.of(filePaths),
       runAt: runAt,
+      agentCreated: agent,
     );
     plans.add(p);
     _persist();
@@ -241,8 +243,55 @@ class TransferEngine extends ChangeNotifier {
         dirty = true;
         continue;
       }
-      p.status = PlanStatus.running;
-      p.peerAlias = peer.alias;
+      if (!_dispatchingPlans.add(p.id)) continue;
+      dirty = true;
+      unawaited(
+        _dispatchPlan(p, peer)
+            .whenComplete(() => _dispatchingPlans.remove(p.id)),
+      );
+    }
+    if (dirty) _persist();
+  }
+
+  /// Plans mid-dispatch (async scope re-check + send kickoff) so the tick
+  /// loop doesn't start them twice.
+  final _dispatchingPlans = <String>{};
+
+  /// Dispatches a due plan. Agent-created plans are re-validated against
+  /// the CURRENT security scope here — the whitelist may have tightened
+  /// since the plan was queued. Strict mode fails the plan; otherwise a
+  /// confirm card asks the user (AI mode off denies as well).
+  Future<void> _dispatchPlan(SendPlan p, Peer peer) async {
+    try {
+      if (p.agentCreated) {
+        final denied = <String>[];
+        for (final x in p.filePaths) {
+          if (!await pathInScope(x)) {
+            denied.add(x.split(Platform.pathSeparator).last);
+          }
+        }
+        if (denied.isNotEmpty) {
+          final total = p.filePaths
+              .fold(0, (s, x) => s + File(x).lengthSync());
+          final ok = !securityScope.strict &&
+              await agentApprove(
+                  'plan',
+                  '计划发送含白名单外文件: ${denied.join(', ')}',
+                  total,
+                  remote: false,
+                  forceConfirm: true);
+          if (!ok) {
+            p.status = PlanStatus.failed;
+            p.error = '安全隔离:文件不在允许目录内: ${denied.first}';
+            return;
+          }
+        }
+      }
+      // The plan may have been cancelled, or the peer dropped, while the
+      // async checks ran.
+      if (p.status != PlanStatus.pending) return;
+      final pe = peers[p.peerFingerprint];
+      if (pe == null || !pe.online) return;
       final files = [
         for (final x in p.filePaths)
           TransferFile(
@@ -252,15 +301,15 @@ class TransferEngine extends ChangeNotifier {
             path: x,
           ),
       ];
-      unawaited(
-        sendFiles(peer, files).then((m) {
-          p.messageId = m.id;
-          _persist();
-        }),
-      );
-      dirty = true;
+      // Set messageId before flipping status so a tick running mid-await
+      // never sees `running` with no message and marks the plan failed.
+      p.messageId = (await sendFiles(pe, files)).id;
+      p.status = PlanStatus.running;
+      p.peerAlias = pe.alias;
+    } finally {
+      _persist();
+      notifyListeners();
     }
-    if (dirty) _persist();
   }
 
   // ------------------------------------------------------------ agent hooks
@@ -340,23 +389,32 @@ class TransferEngine extends ChangeNotifier {
       if (e.startsWith('~') && home != null) {
         e = home + e.substring(1);
       }
-      roots.add(_canon(e));
+      final c = _canon(e);
+      if (c != null) roots.add(c);
     }
-    roots.add(_canon((await files.stagingDir()).path));
-    roots.add(_canon(downloads.path));
+    final staging = _canon((await files.stagingDir()).path);
+    if (staging != null) roots.add(staging);
+    final dl = _canon(downloads.path);
+    if (dl != null) roots.add(dl);
     return roots.toSet().toList();
   }
 
-  /// True when [path] resolves inside an allowed root.
+  /// True when [path] resolves inside an allowed root. A path whose
+  /// symlinks cannot be resolved counts as outside — fail-safe.
   Future<bool> pathInScope(String path) async {
-    return pathWithinRoots(_canon(path), await allowedRoots());
+    final c = _canon(path);
+    return c != null && pathWithinRoots(c, await allowedRoots());
   }
 
-  String _canon(String path) {
+  /// Normalized absolute path with symlinks resolved, or null when
+  /// resolution fails (broken link / permission) — treat as unverifiable.
+  String? _canon(String path) {
     var p = p2.normalize(File(path).absolute.path);
     try {
       p = File(p).resolveSymbolicLinksSync();
-    } catch (_) {}
+    } catch (_) {
+      return null;
+    }
     return p;
   }
 

@@ -196,10 +196,12 @@ class SecurityScope {
 /// caller before this). [path] and every entry of [roots] are expected to
 /// be absolute and normalized.
 bool pathWithinRoots(String path, List<String> roots) {
-  final p = path.replaceAll('//', '/');
+  // Compare on forward slashes so Windows-style canonical paths still match.
+  final p = path.replaceAll('\\', '/').replaceAll('//', '/');
   for (final r in roots) {
-    if (r.isEmpty) continue;
-    final root = r.endsWith('/') ? r.substring(0, r.length - 1) : r;
+    var root = r.replaceAll('\\', '/');
+    if (root.endsWith('/')) root = root.substring(0, root.length - 1);
+    if (root.isEmpty) continue;
     if (p == root || p.startsWith('$root/')) return true;
   }
   return false;
@@ -371,6 +373,7 @@ class SendPlan {
     required this.filePaths,
     this.runAt,
     this.status = PlanStatus.pending,
+    this.agentCreated = false,
     DateTime? createdAt,
     this.messageId,
     this.error,
@@ -385,6 +388,10 @@ class SendPlan {
   final DateTime? runAt;
   PlanStatus status;
   final DateTime createdAt;
+
+  /// Created through the agent API (vs the in-app plans UI). Agent plans
+  /// are re-checked against the security scope at dispatch time.
+  final bool agentCreated;
 
   /// The transfer message spawned by this plan, once dispatched.
   String? messageId;
@@ -413,6 +420,7 @@ class SendPlan {
         runAt: DateTime.tryParse(j['runAt'] as String? ?? ''),
         status: PlanStatus.values
             .firstWhere((s) => s.name == j['status'], orElse: () => PlanStatus.failed),
+        agentCreated: j['agent'] == true,
         createdAt: DateTime.tryParse(j['createdAt'] as String? ?? ''),
         messageId: j['messageId'] as String?,
         error: j['error'] as String?,
