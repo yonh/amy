@@ -20,18 +20,14 @@ subprojects {
 }
 
 // Plugins like desktop_drop declare compileSdk 33 while their androidx
-// dependencies require 34+ — force every library module onto the same
-// compileSdk the Flutter toolchain uses for the app.
+// dependencies require 34+ — force every Android library module to 36 as
+// the plugin is applied.
 subprojects {
-    afterEvaluate {
-        val android = extensions.findByName("android")
-        if (android is com.android.build.gradle.BaseExtension) {
-            val declared = android.compileSdkVersion
-                ?.substringAfter("android-")
-                ?.toIntOrNull()
-            if (declared != null && declared < 36) {
-                android.compileSdkVersion(36)
-            }
+    pluginManager.withPlugin("com.android.library") {
+        val android =
+            extensions.getByName("android") as com.android.build.gradle.LibraryExtension
+        if (android.compileSdk == null || android.compileSdk!! < 36) {
+            android.compileSdk = 36
         }
     }
 }
