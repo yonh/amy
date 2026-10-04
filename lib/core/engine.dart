@@ -105,14 +105,16 @@ class TransferEngine extends ChangeNotifier {
       final dir = Directory('$home/.amy');
       await dir.create(recursive: true);
       final f = File('${dir.path}/endpoint.json');
+      if (!f.existsSync()) await f.create();
+      // The file doubles as the agent credential store — restrict it
+      // BEFORE the token lands in it so there is no readable window.
+      await Process.run('chmod', ['600', f.path]).catchError((_) =>
+          ProcessResult(0, 0, '', ''));
       await f.writeAsString(jsonEncode({
         'port': identity.port,
         'token': _agentToken,
         ...identity.infoJson(),
       }));
-      // The file doubles as the agent credential store — owner-only.
-      unawaited(Process.run('chmod', ['600', f.path]).catchError((_) =>
-          ProcessResult(0, 0, '', '')));
     } catch (_) {}
   }
 
@@ -182,10 +184,11 @@ class TransferEngine extends ChangeNotifier {
     for (final p in plans) {
       if (p.id == id &&
           (p.status == PlanStatus.pending || p.status == PlanStatus.running)) {
+        final wasRunning = p.status == PlanStatus.running;
         p.status = PlanStatus.cancelled;
         // A running plan already dispatched its message — abort it too,
         // otherwise a cancelled plan still delivers its files.
-        if (p.status == PlanStatus.running) {
+        if (wasRunning) {
           final m = p.messageId == null ? null : _findMessage(p.messageId!);
           if (m != null && !m.terminal) cancelMessage(m);
         }
@@ -506,6 +509,9 @@ class TransferEngine extends ChangeNotifier {
         if (!session.decision.isCompleted) session.decision.complete(false);
         server.sessions.remove(msg.id);
       }
+      // Free any filename reservations held by this aborted upload so a
+      // later transfer of the same name keeps the original path.
+      _saveReservations.removeWhere((k, _) => k.startsWith('${msg.id}:'));
     }
     _watchdogs.remove(msg.id)?.cancel();
     _persist();
@@ -530,6 +536,7 @@ class TransferEngine extends ChangeNotifier {
     final msg = _findMessage(s.id);
     final f = s.files[fileId];
     if (msg == null || f == null) return;
+    if (msg.terminal) return; // cancelled/failed — don't resurrect it
     f.status = FileStatus.receiving;
     f.progress = f.size == 0 ? 1 : (received / f.size).clamp(0, 1);
     msg.status = MessageStatus.active;
@@ -570,6 +577,13 @@ class TransferEngine extends ChangeNotifier {
     _saveReservations.removeWhere((k, _) => k.startsWith('${s.id}:'));
     final msg = _findMessage(s.id);
     if (msg != null && !msg.terminal) {
+      // Anything still queued will never arrive now — mark it so the
+      // message resolves instead of waiting on the stall watchdog.
+      for (final f in msg.files) {
+        if (f.status != FileStatus.done && f.status != FileStatus.failed) {
+          f.status = FileStatus.skipped;
+        }
+      }
       msg.status = reason == 'cancelled'
           ? MessageStatus.cancelled
           : MessageStatus.declined;

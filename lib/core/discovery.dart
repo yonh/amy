@@ -166,14 +166,24 @@ class DiscoveryService {
 
   /// If a code-connect is in flight, ask this (re)discovered peer whether it
   /// owns the pending code; completes the pending connect on a match.
+  /// Fingerprints currently being asked about the pending code — keeps a
+  /// concurrent second verification of the same peer from completing the
+  /// shared completer twice.
+  final _codeChecksInFlight = <String>{};
+
   Future<void> _checkPendingCode(Peer peer) async {
     final code = _pendingVerifyCode;
     final completer = _pendingCodeCompleter;
     if (code == null || completer == null || completer.isCompleted) return;
-    if (await _verifyCode(peer, code)) {
-      _pendingVerifyCode = null;
-      _pendingCodeCompleter = null;
-      completer.complete(peer);
+    if (!_codeChecksInFlight.add(peer.fingerprint)) return;
+    try {
+      if (await _verifyCode(peer, code)) {
+        _pendingVerifyCode = null;
+        _pendingCodeCompleter = null;
+        if (!completer.isCompleted) completer.complete(peer);
+      }
+    } finally {
+      _codeChecksInFlight.remove(peer.fingerprint);
     }
   }
 
@@ -220,15 +230,21 @@ class DiscoveryService {
     }
   }
 
-  /// Probes one host on the base port; on deep sweeps falls back to the
-  /// first few alternate ports so devices that could not bind 47777 are
+  /// Probes one host on the base port; on deep sweeps also probes the
+  /// first few alternate ports so devices that could not bind 47777 —
+  /// or a second instance sitting behind a sibling that did — are
   /// still found without mDNS.
   Future<void> _probeHost(String host, {required bool deep}) async {
-    if (await _probe(host) != null) return;
-    if (!deep) return;
-    for (var off = 1; off <= 3; off++) {
-      if (await _probe(host, kBasePort + off) != null) return;
+    // Probe the base port AND alternates even when the first responds — a
+    // host may run two amy instances and the device we want may sit on
+    // 47778 while 47777 belongs to another.
+    final jobs = <Future<Peer?>>[_probe(host)];
+    if (deep) {
+      for (var off = 1; off <= 3; off++) {
+        jobs.add(_probe(host, kBasePort + off));
+      }
     }
+    await Future.wait(jobs);
   }
 
   Future<Set<String>> _localSubnets() async {

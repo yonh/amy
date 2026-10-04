@@ -20,14 +20,16 @@ subprojects {
 }
 
 // Plugins like desktop_drop declare compileSdk 33 while their androidx
-// dependencies require 34+ — force every Android library module to 36 as
-// the plugin is applied.
-subprojects {
-    pluginManager.withPlugin("com.android.library") {
-        val android =
-            extensions.getByName("android") as com.android.build.gradle.LibraryExtension
-        if (android.compileSdk == null || android.compileSdk!! < 36) {
-            android.compileSdk = 36
+// dependencies require 34+ — after every project is evaluated (so a
+// plugin's own `compileSdk 33` line has already run), raise every
+// Android library module's compileSdk to at least 36.
+gradle.projectsEvaluated {
+    rootProject.subprojects.forEach { sub ->
+        sub.extensions.findByName("android")?.let { ext ->
+            val android = ext as com.android.build.gradle.LibraryExtension
+            if (android.compileSdk == null || android.compileSdk!! < 36) {
+                android.compileSdk = 36
+            }
         }
     }
 }
