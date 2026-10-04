@@ -210,29 +210,36 @@ Future<Object?> _callTool(
   }
 }
 
-/// Talks to the app's loopback agent API; port from ~/.amy/endpoint.json
-/// or by probing.
+/// Talks to the app's loopback agent API; port + per-run token come from
+/// ~/.amy/endpoint.json (chmod 600). Token required on every call.
 class _AmyClient {
   final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
   int? _port;
+  String _token = '';
 
   Future<int> get port async => _port ??= await _findPort();
 
   Future<int> _findPort() async {
-    try {
-      final home = Platform.environment['HOME'] ??
-          Platform.environment['USERPROFILE'];
-      final f = File('$home/.amy/endpoint.json');
-      if (await f.exists()) {
-        final j = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
-        final p = (j['port'] as num).toInt();
-        if (await _alive(p)) return p;
+    final home = Platform.environment['HOME'] ??
+        Platform.environment['USERPROFILE'];
+    if (home != null) {
+      // A sandboxed macOS amy writes inside its container — check both.
+      for (final f in [
+        File('$home/.amy/endpoint.json'),
+        File('$home/Library/Containers/com.yonh.amy/Data/.amy/endpoint.json'),
+      ]) {
+        try {
+          if (await f.exists()) {
+            final j =
+                jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+            final p = (j['port'] as num).toInt();
+            _token = (j['token'] as String?) ?? '';
+            if (await _alive(p)) return p;
+          }
+        } catch (_) {}
       }
-    } catch (_) {}
-    for (var p = 47777; p < 47787; p++) {
-      if (await _alive(p)) return p;
     }
-    throw StateError('找不到运行中的 amy（agent api 未响应）');
+    throw StateError('找不到运行中的 amy（~/.amy/endpoint.json 未响应）');
   }
 
   Future<bool> _alive(int port) async {
@@ -240,6 +247,7 @@ class _AmyClient {
       final r = await client
           .getUrl(Uri.parse('http://127.0.0.1:$port/api/v1/agent/identity'))
           .timeout(const Duration(seconds: 2));
+      if (_token.isNotEmpty) r.headers.set('x-amy-token', _token);
       final res = await r.close().timeout(const Duration(seconds: 2));
       await res.drain<void>();
       return res.statusCode == 200;
@@ -252,6 +260,7 @@ class _AmyClient {
       String method, String path, Map<String, dynamic>? body) async {
     final req =
         await client.openUrl(method, _u(await port, path));
+    if (_token.isNotEmpty) req.headers.set('x-amy-token', _token);
     if (body != null) {
       req.headers.contentType = ContentType.json;
       req.write(jsonEncode(body));
@@ -282,6 +291,7 @@ class _AmyClient {
       final name = p.split(Platform.pathSeparator).last;
       final req = await client.openUrl(
           'POST', _u(await port, 'stage?name=${Uri.encodeComponent(name)}'));
+      if (_token.isNotEmpty) req.headers.set('x-amy-token', _token);
       req.headers.contentType = ContentType.binary;
       req.contentLength = await f.length();
       await req.addStream(f.openRead());

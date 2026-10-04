@@ -35,12 +35,16 @@ Future<Directory> stagingDir() async {
 }
 
 /// Drops staged files older than a day (plan dead-ends, crashed sends).
-Future<void> pruneStaging({Duration olderThan = const Duration(hours: 24)}) async {
+/// Paths in [keep] (e.g. files a pending plan still needs) are never pruned.
+Future<void> pruneStaging({
+  Duration olderThan = const Duration(hours: 24),
+  Set<String> keep = const {},
+}) async {
   try {
     final dir = await stagingDir();
     final cutoff = DateTime.now().subtract(olderThan);
     await for (final e in dir.list()) {
-      if (e is File) {
+      if (e is File && !keep.contains(e.path)) {
         final st = await e.stat();
         if (st.modified.isBefore(cutoff)) await e.delete();
       }
@@ -49,8 +53,13 @@ Future<void> pruneStaging({Duration olderThan = const Duration(hours: 24)}) asyn
 }
 
 String sanitizeFileName(String name) {
-  final clean = name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_').trim();
+  var clean = name
+      .replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')
+      // Control characters and bidi marks make names unusable or misleading.
+      .replaceAll(RegExp(r'[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]'), '')
+      .trim();
   if (clean.isEmpty || clean == '.' || clean == '..') return 'file';
+  if (clean.length > 200) clean = clean.substring(0, 200);
   return clean;
 }
 

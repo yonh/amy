@@ -33,7 +33,6 @@ class SelfIdentity {
         'platform': platformName(platform),
         'model': model,
         'port': port,
-        'code': code,
       };
 }
 

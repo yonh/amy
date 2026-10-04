@@ -1,6 +1,6 @@
 // Command line client for a running amy app: `dart run bin/amy_cli.dart`.
-// Talks to the loopback-only agent API on the app's HTTP port (discovered
-// via ~/.amy/endpoint.json or by probing 47777+).
+// Talks to the loopback-only agent API on the app's HTTP port; the port and
+// the per-run token come from ~/.amy/endpoint.json (chmod 600).
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -10,12 +10,12 @@ Future<int> main(List<String> args) async {
     _usage();
     return args.isEmpty ? 1 : 0;
   }
-  final port = await _findPort();
-  if (port == null) {
-    stderr.writeln('找不到运行中的 amy（~/.amy/endpoint.json 不存在且 47777+ 未响应）');
+  final ep = await _findEndpoint();
+  if (ep == null) {
+    stderr.writeln('找不到运行中的 amy（~/.amy/endpoint.json 不存在或未在响应）');
     return 2;
   }
-  final api = _Api(port);
+  final api = _Api(ep.$1, ep.$2);
   final cmd = args.first;
   final rest = args.sublist(1);
   try {
@@ -40,7 +40,7 @@ Future<int> main(List<String> args) async {
         });
         final m = j['message'] as Map<String, dynamic>;
         stdout.writeln('已发出: ${m['id']} 状态 ${m['status']}');
-        if (rest.contains('--wait') || true) await _waitDone(api, m['id']);
+        return await _waitDone(api, m['id']);
       case 'status':
         if (rest.isEmpty) return _err('用法: status <messageId>');
         _print(await api.get('message?id=${rest.first}'));
@@ -166,29 +166,37 @@ int _err(String m) {
 void _print(Object? o) => stdout
     .writeln(const JsonEncoder.withIndent('  ').convert(o));
 
-Future<int?> _findPort() async {
-  try {
-    final home = Platform.environment['HOME'] ??
-        Platform.environment['USERPROFILE'];
-    final f = File('$home/.amy/endpoint.json');
-    if (await f.exists()) {
-      final j = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
-      final p = (j['port'] as num).toInt();
-      if (await _alive(p)) return p;
-    }
-  } catch (_) {}
-  for (var p = 47777; p < 47787; p++) {
-    if (await _alive(p)) return p;
+/// (port, token) from ~/.amy/endpoint.json; the token is required on every
+/// call so port probing alone is no longer enough to drive the app. On macOS
+/// a sandboxed amy writes inside its container, so we check both locations.
+Future<(int, String)?> _findEndpoint() async {
+  final home = Platform.environment['HOME'] ??
+      Platform.environment['USERPROFILE'];
+  if (home == null) return null;
+  for (final f in [
+    File('$home/.amy/endpoint.json'),
+    File('$home/Library/Containers/com.yonh.amy/Data/.amy/endpoint.json'),
+  ]) {
+    try {
+      if (await f.exists()) {
+        final j =
+            jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+        final port = (j['port'] as num).toInt();
+        final token = (j['token'] as String?) ?? '';
+        if (await _alive(port, token)) return (port, token);
+      }
+    } catch (_) {}
   }
   return null;
 }
 
-Future<bool> _alive(int port) async {
+Future<bool> _alive(int port, String token) async {
   try {
     final c = HttpClient()..connectionTimeout = const Duration(seconds: 1);
     final r = await c
         .getUrl(Uri.parse('http://127.0.0.1:$port/api/v1/agent/identity'))
         .timeout(const Duration(seconds: 1));
+    if (token.isNotEmpty) r.headers.set('x-amy-token', token);
     final res = await r.close().timeout(const Duration(seconds: 1));
     await res.drain<void>();
     c.close();
@@ -205,8 +213,9 @@ class _ApiError implements Exception {
 }
 
 class _Api {
-  _Api(this.port);
+  _Api(this.port, this.token);
   final int port;
+  final String token;
   final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
 
   Uri _u(String path) => Uri.parse('http://127.0.0.1:$port/api/v1/agent/$path');
@@ -214,6 +223,7 @@ class _Api {
   Future<Map<String, dynamic>> _req(
       String method, String path, Map<String, dynamic>? body) async {
     final req = await client.openUrl(method, _u(path));
+    if (token.isNotEmpty) req.headers.set('x-amy-token', token);
     if (body != null) {
       req.headers.contentType = ContentType.json;
       req.write(jsonEncode(body));
@@ -234,6 +244,7 @@ class _Api {
 
   Future<Map<String, dynamic>> postStream(String p, File f) async {
     final req = await client.openUrl('POST', _u(p));
+    if (token.isNotEmpty) req.headers.set('x-amy-token', token);
     req.headers.contentType = ContentType.binary;
     req.contentLength = await f.length();
     await req.addStream(f.openRead());

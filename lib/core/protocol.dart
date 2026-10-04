@@ -2,10 +2,11 @@
 /// LocalSend protocol so the shape stays familiar.
 ///
 /// Endpoints on every device:
-///   GET  /api/v1/info            -> device info (alias, fingerprint, code)
+///   GET  /api/v1/info            -> device info (alias, fingerprint)
 ///   POST /api/v1/prepare-upload  -> offer files; blocks until accepted/declined
 ///   POST /api/v1/upload?sessionId&fileId&token -> raw body bytes
-///   POST /api/v1/cancel?sessionId -> abort an in-flight session
+///   POST /api/v1/cancel?sessionId&token -> abort an in-flight session
+///   POST /api/v1/verify-code {code} -> 200 iff the posted pairing code is ours
 library;
 
 const kProtocolVersion = 1;
@@ -27,10 +28,11 @@ const kInfoPath = '/api/v1/info';
 const kPreparePath = '/api/v1/prepare-upload';
 const kUploadPath = '/api/v1/upload';
 const kCancelPath = '/api/v1/cancel';
+const kVerifyCodePath = '/api/v1/verify-code';
 
 /// 6-digit pairing code, rotated every [kCodeWindow]. Derived from the device
-/// fingerprint, announced via mDNS TXT and /info — entering the peer's code
-/// connects to whichever discovered device currently advertises it.
+/// fingerprint and shown only on the device's own screen — it is never
+/// broadcast; peers prove they saw it via /verify-code.
 const kCodeWindow = Duration(minutes: 10);
 
 String pairCode(String fingerprint) {

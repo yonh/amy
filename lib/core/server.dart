@@ -25,6 +25,10 @@ class IncomingSession {
   /// Completes true when the local user accepts, false on decline/timeout.
   final Completer<bool> decision = Completer<bool>();
   bool cancelled = false;
+
+  /// Set only after the user actually accepted — /upload requires it, so an
+  /// offer still awaiting an answer cannot receive bytes.
+  bool accepted = false;
 }
 
 typedef PrepareHandler = Future<IncomingSession> Function(
@@ -121,6 +125,8 @@ class AmyServer {
         await _upload(req);
       } else if (req.method == 'POST' && path == kCancelPath) {
         _cancel(req);
+      } else if (req.method == 'POST' && path == kVerifyCodePath) {
+        await _verifyCode(req);
       } else if (path.startsWith(AgentApi.prefix)) {
         final remote = req.connectionInfo?.remoteAddress;
         if (onAgent == null || remote == null || !remote.isLoopback) {
@@ -171,6 +177,7 @@ class AmyServer {
       _json(req, 403, {'accepted': false});
       return;
     }
+    session.accepted = true;
     _json(req, 200, {
       'accepted': true,
       'sessionId': session.id,
@@ -200,19 +207,30 @@ class AmyServer {
       _json(req, 410, {'error': 'cancelled'});
       return;
     }
+    if (!session.accepted) {
+      // Tokens only exist after acceptance — a session that has not been
+      // accepted must never receive bytes.
+      _json(req, 403, {'error': 'offer not accepted'});
+      return;
+    }
 
     final dest = await onSavePath(session, file);
     final tmp = File('$dest.amypart');
     final sink = tmp.openWrite();
     var received = 0;
     var failed = false;
+    var oversized = false;
     try {
       await for (final chunk in req) {
-        sink.add(chunk);
         received += chunk.length;
-        if (received <= file.size) {
-          onUploadProgress(session, fileId, received);
+        if (received > file.size) {
+          // Sender overrun — refuse early rather than fill the disk.
+          failed = true;
+          oversized = true;
+          break;
         }
+        sink.add(chunk);
+        onUploadProgress(session, fileId, received);
         if (session.cancelled) {
           failed = true;
           break;
@@ -231,6 +249,9 @@ class AmyServer {
       await tmp.delete().catchError((_) => tmp);
       if (session.cancelled) {
         _json(req, 410, {'error': 'cancelled'});
+      } else if (oversized) {
+        onUploadDone(session, fileId, '');
+        _json(req, 413, {'error': 'exceeds declared size: $received/${file.size}'});
       } else {
         onUploadDone(session, fileId, '');
         _json(req, 500, {'error': 'short read: $received/${file.size}'});
@@ -245,13 +266,34 @@ class AmyServer {
   void _cancel(HttpRequest req) {
     final q = req.uri.queryParameters;
     final session = sessions[q['sessionId']];
-    if (session != null) {
+    // Only the sender may abort: it must echo one of the per-file tokens it
+    // was issued at accept time. A bare sessionId is not proof of ownership.
+    if (session != null &&
+        q['token'] != null &&
+        session.tokens.values.contains(q['token'])) {
       session.cancelled = true;
       sessions.remove(session.id);
       onSessionEnd(session, 'cancelled');
       if (!session.decision.isCompleted) session.decision.complete(false);
+      _json(req, 200, {'ok': true});
+    } else {
+      _json(req, session == null ? 404 : 403,
+          {'error': 'unknown session or bad token'});
     }
-    _json(req, 200, {'ok': true});
+  }
+
+  /// Pairing-code check: the caller proves it saw the code on our screen
+  /// without us ever broadcasting it. Wrong guesses cost 150ms each.
+  Future<void> _verifyCode(HttpRequest req) async {
+    final body = await utf8.decodeStream(req);
+    final code =
+        (jsonDecode(body) as Map<String, dynamic>?)?['code'] as String?;
+    if (code != null && code == identity.code) {
+      _json(req, 200, {'ok': true});
+      return;
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    _json(req, 404, {'ok': false});
   }
 
   void _json(HttpRequest req, int status, Map<String, dynamic> body) {

@@ -16,6 +16,13 @@ class AgentApi {
   static const prefix = '/api/v1/agent/';
 
   Future<void> handle(HttpRequest req) async {
+    // Any local process can reach loopback, so a per-run token is required —
+    // it lives in ~/.amy/endpoint.json (chmod 600) where CLI/MCP read it.
+    if (engine.agentToken.isNotEmpty &&
+        req.headers.value('x-amy-token') != engine.agentToken) {
+      _json(req, 403, {'error': 'missing or bad agent token'});
+      return;
+    }
     final path = req.uri.path.substring(prefix.length);
     try {
       switch ((req.method, path)) {

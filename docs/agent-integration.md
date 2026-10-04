@@ -1,7 +1,8 @@
 # Agent 接入 amy
 
 运行中的 amy 暴露一个**仅 loopback** 的 Agent API（`http://127.0.0.1:<port>/api/v1/agent/*`，
-非本机来源一律 403）。端口写入 `~/.amy/endpoint.json`，两个客户端都会先读它、再探测 47777+。
+非本机来源一律 403）。端口和每次运行的 `token` 写入 `~/.amy/endpoint.json`（chmod 600）；
+amy_cli / amy_mcp 会读出 token 并在每个请求里带 `X-Amy-Token` 头——光有端口无法驱动应用。
 
 | 端点 | 说明 |
 | --- | --- |

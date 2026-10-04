@@ -20,7 +20,10 @@ class DiscoveryService {
 
   final _peers = <String, Peer>{};
   final _peersController = StreamController<Map<String, Peer>>.broadcast();
-  final _pendingCodes = <String, Completer<Peer?>>{};
+  /// Pending code-connect: the code we are currently asking peers to verify.
+  String? _pendingVerifyCode;
+  Completer<Peer?>? _pendingCodeCompleter;
+  int _scanCycle = 0;
   final _http = HttpClient()..connectionTimeout = const Duration(seconds: 4);
 
   BonsoirBroadcast? _broadcast;
@@ -72,7 +75,6 @@ class DiscoveryService {
             'pf': platformName(identity.platform),
             'model': identity.model,
             'alias': identity.alias,
-            'code': identity.code,
           },
         ),
       );
@@ -119,9 +121,8 @@ class DiscoveryService {
       model: attrs['model'] ?? '',
       host: host,
       port: service.port,
-      code: attrs['code'],
     );
-    _checkPendingCode(peer);
+    unawaited(_checkPendingCode(peer));
   }
 
   void _markGone(BonsoirService service) {
@@ -140,7 +141,6 @@ class DiscoveryService {
     required String model,
     required String host,
     required int port,
-    String? code,
   }) {
     final existing = _peers[fingerprint];
     final peer = existing ??
@@ -159,17 +159,22 @@ class DiscoveryService {
       ..host = host
       ..port = port
       ..lastSeen = DateTime.now();
-    if (code != null && code.isNotEmpty) peer.code = code;
     _peers[fingerprint] = peer;
     _peersController.add(Map.of(_peers));
     return peer;
   }
 
-  void _checkPendingCode(Peer peer) {
-    final code = peer.code;
-    if (code == null) return;
-    final completer = _pendingCodes.remove(code);
-    if (completer != null && !completer.isCompleted) completer.complete(peer);
+  /// If a code-connect is in flight, ask this (re)discovered peer whether it
+  /// owns the pending code; completes the pending connect on a match.
+  Future<void> _checkPendingCode(Peer peer) async {
+    final code = _pendingVerifyCode;
+    final completer = _pendingCodeCompleter;
+    if (code == null || completer == null || completer.isCompleted) return;
+    if (await _verifyCode(peer, code)) {
+      _pendingVerifyCode = null;
+      _pendingCodeCompleter = null;
+      completer.complete(peer);
+    }
   }
 
   /// Re-checks every known peer at its last-seen host:port so lastSeen
@@ -187,17 +192,21 @@ class DiscoveryService {
   }
 
   /// Probes every address on each local /24 for the /info endpoint.
-  /// Concurrent, short-timeout; safe to run often.
+  /// Concurrent, short-timeout; safe to run often. Every fourth pass also
+  /// probes the first few alternate ports on hosts that miss the base port —
+  /// mDNS can drop out, and a device that could not bind kBasePort would
+  /// otherwise never appear.
   Future<void> scanLocalSubnets() async {
     if (_scanning) return;
     _scanning = true;
     try {
       await _revalidateKnown();
       final subnets = await _localSubnets();
+      final deep = ++_scanCycle % 4 == 0;
       final jobs = <Future<void>>[];
       for (final prefix in subnets) {
         for (var i = 1; i < 255; i++) {
-          jobs.add(_probe('$prefix.$i'));
+          jobs.add(_probeHost('$prefix.$i', deep: deep));
           // Keep a bound on in-flight sockets.
           if (jobs.length >= 80) {
             await Future.wait(jobs);
@@ -208,6 +217,17 @@ class DiscoveryService {
       await Future.wait(jobs);
     } finally {
       _scanning = false;
+    }
+  }
+
+  /// Probes one host on the base port; on deep sweeps falls back to the
+  /// first few alternate ports so devices that could not bind 47777 are
+  /// still found without mDNS.
+  Future<void> _probeHost(String host, {required bool deep}) async {
+    if (await _probe(host) != null) return;
+    if (!deep) return;
+    for (var off = 1; off <= 3; off++) {
+      if (await _probe(host, kBasePort + off) != null) return;
     }
   }
 
@@ -248,9 +268,8 @@ class DiscoveryService {
         model: (j['model'] as String?) ?? '',
         host: host,
         port: (j['port'] as num?)?.toInt() ?? port,
-        code: j['code'] as String?,
       );
-      _checkPendingCode(peer);
+      unawaited(_checkPendingCode(peer));
       return peer;
     } catch (_) {
       return null;
@@ -259,24 +278,51 @@ class DiscoveryService {
 
   /// Connect by the peer's displayed 6-digit code. Matches already-discovered
   /// peers first, then kicks a subnet scan and waits a while for a match.
+  /// Connect by the peer's displayed 6-digit code. Codes are never
+  /// broadcast — we ask each candidate host to verify it via /verify-code,
+  /// so a network observer learns nothing by watching discovery traffic.
   Future<Peer?> connectByCode(String code) async {
-    for (final p in _peers.values) {
-      if (p.code == code) {
+    // Fast path: ask each known online peer first (cheap, few requests).
+    for (final p in _peers.values.toList()) {
+      if (!p.online) continue;
+      if (await _verifyCode(p, code)) {
         p.pinned = true;
         _peersController.add(Map.of(_peers));
         return p;
       }
     }
     final completer = Completer<Peer?>();
-    _pendingCodes[code] = completer;
+    _pendingVerifyCode = code;
+    _pendingCodeCompleter = completer;
     unawaited(scanLocalSubnets());
     final peer = await completer.future
         .timeout(const Duration(seconds: 20), onTimeout: () => null);
+    if (_pendingVerifyCode == code) {
+      _pendingVerifyCode = null;
+      _pendingCodeCompleter = null;
+    }
     if (peer != null) {
       peer.pinned = true;
       _peersController.add(Map.of(_peers));
     }
     return peer;
+  }
+
+  /// POSTs /verify-code — 200 iff the remote device currently shows [code].
+  Future<bool> _verifyCode(Peer p, String code) async {
+    try {
+      final req = await _http
+          .postUrl(p.baseUri.replace(path: kVerifyCodePath))
+          .timeout(const Duration(milliseconds: 900));
+      req.headers.contentType = ContentType.json;
+      req.write(jsonEncode({'code': code}));
+      final res = await req.close()
+          .timeout(const Duration(milliseconds: 1200));
+      await res.drain<void>();
+      return res.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Connect directly to host[:port] — used by QR codes and manual entry.
@@ -301,7 +347,6 @@ class DiscoveryService {
       model: (info['model'] as String?) ?? '',
       host: host,
       port: (info['port'] as num?)?.toInt() ?? kBasePort,
-      code: info['code'] as String?,
     );
   }
 

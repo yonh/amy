@@ -20,6 +20,7 @@ class _OutgoingSend {
   final TransferMessage message;
   final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
   String? sessionId;
+  Map<String, String> tokens = {};
   bool cancelled = false;
 }
 
@@ -45,6 +46,15 @@ class TransferEngine extends ChangeNotifier {
   final _outgoing = <String, _OutgoingSend>{};
   final _watchdogs = <String, Timer>{};
   Timer? _planTimer;
+
+  /// sessionId:fileId -> reserved destination path, so two accepted uploads
+  /// with the same filename can never pick the same free name.
+  final _saveReservations = <String, String>{};
+
+  /// Per-run credential local agents must send as X-Amy-Token. Written into
+  /// ~/.amy/endpoint.json where amy_cli/amy_mcp pick it up.
+  String get agentToken => _agentToken;
+  String _agentToken = '';
 
   bool ready = false;
   String? lastError;
@@ -72,8 +82,12 @@ class TransferEngine extends ChangeNotifier {
     );
     identity.port = await server.start();
     await discovery.start();
+    _agentToken = randomId(16);
     unawaited(_writeAgentEndpoint());
-    unawaited(files.pruneStaging());
+    unawaited(files.pruneStaging(keep: {
+      for (final p in plans)
+        if (p.status == PlanStatus.pending) ...p.filePaths,
+    }));
     _planTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       _tickPlans();
     });
@@ -90,10 +104,15 @@ class TransferEngine extends ChangeNotifier {
       if (home == null) return;
       final dir = Directory('$home/.amy');
       await dir.create(recursive: true);
-      await File('${dir.path}/endpoint.json').writeAsString(jsonEncode({
+      final f = File('${dir.path}/endpoint.json');
+      await f.writeAsString(jsonEncode({
         'port': identity.port,
+        'token': _agentToken,
         ...identity.infoJson(),
       }));
+      // The file doubles as the agent credential store — owner-only.
+      unawaited(Process.run('chmod', ['600', f.path]).catchError((_) =>
+          ProcessResult(0, 0, '', '')));
     } catch (_) {}
   }
 
@@ -164,6 +183,12 @@ class TransferEngine extends ChangeNotifier {
       if (p.id == id &&
           (p.status == PlanStatus.pending || p.status == PlanStatus.running)) {
         p.status = PlanStatus.cancelled;
+        // A running plan already dispatched its message — abort it too,
+        // otherwise a cancelled plan still delivers its files.
+        if (p.status == PlanStatus.running) {
+          final m = p.messageId == null ? null : _findMessage(p.messageId!);
+          if (m != null && !m.terminal) cancelMessage(m);
+        }
       }
     }
     _persist();
@@ -273,6 +298,7 @@ class TransferEngine extends ChangeNotifier {
       final j = jsonDecode(body) as Map<String, dynamic>;
       send.sessionId = j['sessionId'] as String;
       final tokens = (j['files'] as Map).cast<String, String>();
+      send.tokens = tokens;
       msg.status = MessageStatus.active;
       _persist();
 
@@ -413,20 +439,33 @@ class TransferEngine extends ChangeNotifier {
     }
     msg.status = MessageStatus.active;
     if (!session.decision.isCompleted) session.decision.complete(true);
-    // Stall watchdog: if the sender never starts uploading after we accepted,
-    // something died between approve and upload.
-    _watchdogs[messageId] = Timer(const Duration(seconds: 20), () {
-      final anyStarted = msg.files.any(
-        (f) => f.status == FileStatus.receiving || f.status == FileStatus.done,
-      );
-      if (!anyStarted && !msg.terminal) {
-        msg.status = MessageStatus.cancelled;
-        msg.error = '对方已取消';
-        session.cancelled = true;
-        _persist();
-      }
-    });
+    // Stall watchdog: re-armed on every progress tick and each finished
+    // file — any silent gap past the limit means the sender died mid-flight.
+    _armStallWatchdog(messageId);
     _persist();
+  }
+
+  /// (Re)starts the 30s stall watchdog for an accepted incoming session.
+  /// Fails unfinished files and cancels the message if the sender goes
+  /// silent — covers "accepted but no bytes" and mid-transfer abandonment.
+  void _armStallWatchdog(String id) {
+    _watchdogs.remove(id)?.cancel();
+    _watchdogs[id] = Timer(const Duration(seconds: 30), () {
+      final session = server.sessions[id];
+      final msg = _findMessage(id);
+      if (session == null || msg == null || msg.terminal) return;
+      for (final f in msg.files) {
+        if (f.status != FileStatus.done && f.status != FileStatus.failed) {
+          f.status = FileStatus.failed;
+        }
+      }
+      session.cancelled = true;
+      server.sessions.remove(id);
+      _saveReservations.removeWhere((k, _) => k.startsWith('$id:'));
+      msg.status = MessageStatus.cancelled;
+      msg.error = '对方已停止发送';
+      _persist();
+    });
   }
 
   /// Cancels a message from whichever side we are:
@@ -440,6 +479,24 @@ class TransferEngine extends ChangeNotifier {
         send.cancelled = true;
         send.client.close(force: true);
         _outgoing.remove(msg.id);
+        // Tell the receiver so its session stops instead of waiting for the
+        // stall watchdog. Requires one of our issued per-file tokens — the
+        // receiver only honors cancels from the transfer's owner.
+        final sid = send.sessionId;
+        final token =
+            send.tokens.isEmpty ? null : send.tokens.values.first;
+        if (sid != null && token != null) {
+          unawaited(
+            HttpClient()
+                .postUrl(send.peer.baseUri.replace(
+                  path: kCancelPath,
+                  queryParameters: {'sessionId': sid, 'token': token},
+                ))
+                .then((r) => r.close())
+                .then((r) => r.drain<void>())
+                .catchError((_) {}),
+          );
+        }
       }
     } else {
       final session = server.sessions[msg.id];
@@ -449,21 +506,6 @@ class TransferEngine extends ChangeNotifier {
         if (!session.decision.isCompleted) session.decision.complete(false);
         server.sessions.remove(msg.id);
       }
-      // Tell the sender so its bubble flips to cancelled too. The session
-      // id is the same on both sides (receiver created it at prepare time).
-      final peer = peers[msg.peerId];
-      if (peer != null) {
-        unawaited(
-          HttpClient()
-              .postUrl(peer.baseUri.replace(
-                path: kCancelPath,
-                queryParameters: {'sessionId': msg.id},
-              ))
-              .then((r) => r.close())
-              .then((r) => r.drain<void>())
-              .catchError((_) {}),
-        );
-      }
     }
     _watchdogs.remove(msg.id)?.cancel();
     _persist();
@@ -471,7 +513,17 @@ class TransferEngine extends ChangeNotifier {
 
   Future<String> _savePathFor(IncomingSession s, TransferFile f) async {
     final dir = await files.downloadsDir();
-    return files.dedupePath(dir.path, files.sanitizeFileName(f.name));
+    var dest = files.dedupePath(dir.path, files.sanitizeFileName(f.name));
+    // Race guard: another accepted upload may have reserved the same free
+    // name but not written it yet — keep deduping until ours is unique.
+    var n = 1;
+    while (_saveReservations.containsValue(dest)) {
+      dest = files.dedupePath(
+          dir.path, '${files.sanitizeFileName(f.name)} ($n)');
+      n++;
+    }
+    _saveReservations['${s.id}:${f.id}'] = dest;
+    return dest;
   }
 
   void _uploadProgress(IncomingSession s, String fileId, int received) {
@@ -481,6 +533,7 @@ class TransferEngine extends ChangeNotifier {
     f.status = FileStatus.receiving;
     f.progress = f.size == 0 ? 1 : (received / f.size).clamp(0, 1);
     msg.status = MessageStatus.active;
+    _armStallWatchdog(s.id);
     notifyListeners();
   }
 
@@ -495,6 +548,7 @@ class TransferEngine extends ChangeNotifier {
       f.progress = 1;
       f.path = savedTo;
     }
+    _saveReservations.remove('${s.id}:$fileId');
     final allDone = s.files.values.every(
       (x) => x.status == FileStatus.done || x.status == FileStatus.failed,
     );
@@ -503,12 +557,17 @@ class TransferEngine extends ChangeNotifier {
       msg.status = anyOk ? MessageStatus.done : MessageStatus.failed;
       _watchdogs.remove(s.id)?.cancel();
       server.sessions.remove(s.id);
+    } else if (msg != null && !msg.terminal) {
+      // Next file's clock starts now — without this the sender could stall
+      // forever between uploads.
+      _armStallWatchdog(s.id);
     }
     _persist();
   }
 
   void _sessionEnd(IncomingSession s, String reason) {
     _watchdogs.remove(s.id)?.cancel();
+    _saveReservations.removeWhere((k, _) => k.startsWith('${s.id}:'));
     final msg = _findMessage(s.id);
     if (msg != null && !msg.terminal) {
       msg.status = reason == 'cancelled'
