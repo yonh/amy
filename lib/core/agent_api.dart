@@ -309,11 +309,8 @@ class AgentApi {
       return;
     }
     final fs = materialized.files!;
-    final total = fs.fold(0, (s, f) => s + f.size);
-    if (!await _gate(req, 'plan',
-        'agent 请求创建计划发送给 ${peer.alias}', total, remote: false)) {
-      return;
-    }
+    // Validate before the approval gate — a bad timestamp must not wait on
+    // (or be masked by) a 60s approval card.
     final rawRunAt = j['runAt'];
     DateTime? runAt;
     if (rawRunAt != null) {
@@ -323,6 +320,11 @@ class AgentApi {
         _json(req, 400, {'error': 'invalid runAt (expect ISO8601): $rawRunAt'});
         return;
       }
+    }
+    final total = fs.fold(0, (s, f) => s + f.size);
+    if (!await _gate(req, 'plan',
+        'agent 请求创建计划发送给 ${peer.alias}', total, remote: false)) {
+      return;
     }
     final plan = engine.createPlan(peer, fs.map((f) => f.path!).toList(),
         runAt: runAt?.toLocal());
