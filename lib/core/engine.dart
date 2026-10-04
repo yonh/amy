@@ -556,6 +556,20 @@ class TransferEngine extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Sets or clears a peer's custom avatar emoji (null restores the
+  /// platform/brand icon). Persisted so the choice survives restarts and
+  /// merges back onto the discovered peer via restorePeers.
+  void customizePeer(Peer p, {String? iconEmoji}) {
+    p.iconEmoji = (iconEmoji != null && iconEmoji.isEmpty) ? null : iconEmoji;
+    final stored = _store?.peers;
+    if (stored != null &&
+        !stored.any((x) => x.fingerprint == p.fingerprint)) {
+      stored.add(p);
+    }
+    _store?.scheduleSave();
+    notifyListeners();
+  }
+
   @override
   Future<void> dispose() async {
     _planTimer?.cancel();

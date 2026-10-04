@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,6 +9,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../core/models.dart';
 import '../state/providers.dart';
+import 'home_screen.dart' show fileFromPath, supportsDrop;
 import 'icons.dart';
 import 'plans_sheet.dart';
 import 'theme.dart';
@@ -31,6 +33,7 @@ class SessionScreen extends ConsumerStatefulWidget {
 class _SessionScreenState extends ConsumerState<SessionScreen> {
   final _draft = <TransferFile>[];
   bool _picking = false;
+  bool _dropping = false;
 
   Peer get _peer {
     // Follow live updates (online status, alias changes).
@@ -110,8 +113,43 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         _composer(peer),
       ],
     );
-    if (widget.embedded) return body;
-    return Scaffold(body: SafeArea(child: body));
+    Widget child = widget.embedded ? body : Scaffold(body: SafeArea(child: body));
+    if (!supportsDrop) return child;
+    return DropTarget(
+      onDragEntered: (_) => setState(() => _dropping = true),
+      onDragExited: (_) => setState(() => _dropping = false),
+      onDragDone: (d) => setState(() {
+        _dropping = false;
+        _draft.addAll(d.files.map((f) => fileFromPath(f.path)));
+      }),
+      child: Stack(
+        children: [
+          child,
+          if (_dropping)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: Container(
+                  color: AmyTheme.accent.withValues(alpha: 0.12),
+                  alignment: Alignment.center,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 20, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: AmyTheme.accent),
+                    ),
+                    child: const Text('松开即加入发送列表',
+                        style: TextStyle(
+                            color: AmyTheme.accent,
+                            fontWeight: FontWeight.w600)),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   Widget _header(Peer peer) {
@@ -122,11 +160,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         children: [
           if (!widget.embedded)
             const BackButton(),
-          CircleAvatar(
-            backgroundColor: AmyTheme.accent.withValues(alpha: 0.12),
-            child: Icon(iconForPlatform(peer.platform),
-                size: 20, color: AmyTheme.accent),
-          ),
+          deviceAvatar(peer),
           const SizedBox(width: 10),
           Expanded(
             child: Column(

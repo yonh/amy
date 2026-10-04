@@ -242,7 +242,7 @@ class _NewPlanSheetState extends ConsumerState<NewPlanSheet> {
                       value: p.fingerprint,
                       child: Row(
                         children: [
-                          Icon(iconForPlatform(p.platform), size: 18),
+                          deviceAvatar(p, radius: 11),
                           const SizedBox(width: 8),
                           Text(p.alias),
                           if (!p.online)
@@ -260,7 +260,7 @@ class _NewPlanSheetState extends ConsumerState<NewPlanSheet> {
             else
               ListTile(
                 contentPadding: EdgeInsets.zero,
-                leading: Icon(iconForPlatform(_peer!.platform)),
+                leading: deviceAvatar(_peer!),
                 title: Text(_peer!.alias,
                     style: const TextStyle(fontWeight: FontWeight.w600)),
                 subtitle:

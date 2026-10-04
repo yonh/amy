@@ -41,6 +41,7 @@ class Peer {
     required this.port,
     this.code,
     this.pinned = false,
+    this.iconEmoji,
     DateTime? lastSeen,
   }) : lastSeen = lastSeen ?? DateTime.now();
 
@@ -56,6 +57,9 @@ class Peer {
 
   /// Manually paired (code/QR/IP) — kept in the device list when offline.
   bool pinned;
+
+  /// User-chosen avatar emoji overriding the platform/brand icon.
+  String? iconEmoji;
   DateTime lastSeen;
 
   bool get online => DateTime.now().difference(lastSeen).inMinutes < 5;
@@ -71,6 +75,7 @@ class Peer {
         'host': host,
         'port': port,
         'pinned': pinned,
+        if (iconEmoji != null) 'iconEmoji': iconEmoji,
         'lastSeen': lastSeen.toIso8601String(),
       };
 
@@ -82,6 +87,7 @@ class Peer {
         host: j['host'] as String? ?? '',
         port: (j['port'] as num?)?.toInt() ?? 0,
         pinned: j['pinned'] as bool? ?? false,
+        iconEmoji: j['iconEmoji'] as String?,
         lastSeen: DateTime.tryParse(j['lastSeen'] as String? ?? ''),
       );
 }
