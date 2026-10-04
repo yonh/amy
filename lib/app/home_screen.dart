@@ -5,11 +5,13 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/identity.dart';
 import '../core/models.dart';
 import '../state/providers.dart';
 import 'ai_sheet.dart';
 import 'approvals_card.dart';
 import 'connect_sheet.dart';
+import 'onboarding_wizard.dart';
 import 'icons.dart';
 import 'plans_sheet.dart';
 import 'session_screen.dart';
@@ -47,6 +49,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// sends immediately instead of opening the session (AirDrop-style).
   final List<TransferFile> _quick = [];
   String? _dropFp;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!await isOnboarded() && mounted) showWizardOnboarding(context);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
