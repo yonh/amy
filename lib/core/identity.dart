@@ -5,6 +5,7 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'llm.dart';
 import 'models.dart';
 import 'protocol.dart';
 
@@ -138,6 +139,23 @@ Future<Map<String, String>> loadRemoteTokens() async {
 Future<void> saveRemoteTokens(Map<String, String> tokens) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.setString('ai.remoteTokens', jsonEncode(tokens));
+}
+
+/// In-app AI assistant endpoint — persisted under 'ai.llmConfig'.
+Future<LlmConfig> loadLlmConfig() async {
+  final prefs = await SharedPreferences.getInstance();
+  final raw = prefs.getString('ai.llmConfig');
+  if (raw == null) return LlmConfig();
+  try {
+    return LlmConfig.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+  } catch (_) {
+    return LlmConfig();
+  }
+}
+
+Future<void> saveLlmConfig(LlmConfig c) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setString('ai.llmConfig', jsonEncode(c.toJson()));
 }
 
 /// Filesystem isolation for agent sends — persisted under 'security.scope'.

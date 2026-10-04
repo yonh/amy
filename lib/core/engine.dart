@@ -6,9 +6,11 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p2;
 
 import 'agent_api.dart';
+import 'ai_brain.dart';
 import 'discovery.dart';
 import 'files.dart' as files;
 import 'identity.dart';
+import 'llm.dart';
 import 'models.dart';
 import 'protocol.dart';
 import 'server.dart';
@@ -73,6 +75,12 @@ class TransferEngine extends ChangeNotifier {
   /// revert to unverifiable, which fails closed under strict mode.
   final stagedSources = <String, String>{};
 
+  /// In-app AI assistant endpoint (OpenAI-compatible, persisted).
+  LlmConfig llmConfig = LlmConfig();
+
+  /// Natural-language assistant driving the same gated agent paths.
+  late final AiBrain brain = AiBrain(this);
+
   /// Pending AI/agent actions awaiting the user's tap.
   final _approvals = <String, AgentAction>{};
 
@@ -105,6 +113,7 @@ class TransferEngine extends ChangeNotifier {
     aiPolicy = await loadAiPolicy();
     _remoteTokens = await loadRemoteTokens();
     securityScope = await loadSecurityScopeOrSeed();
+    llmConfig = await loadLlmConfig();
     identity.agentCapable = aiPolicy.allowRemoteControl;
     _agentToken = randomId(16);
     unawaited(_writeAgentEndpoint());
@@ -390,6 +399,13 @@ class TransferEngine extends ChangeNotifier {
   Future<void> setSecurityScope(SecurityScope s) async {
     securityScope = s;
     await saveSecurityScope(s);
+    notifyListeners();
+  }
+
+  /// Saves the AI assistant endpoint config.
+  Future<void> setLlmConfig(LlmConfig c) async {
+    llmConfig = c;
+    await saveLlmConfig(c);
     notifyListeners();
   }
 

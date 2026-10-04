@@ -1,6 +1,8 @@
 import 'dart:io';
 
+import 'package:amy/core/ai_brain.dart';
 import 'package:amy/core/files.dart';
+import 'package:amy/core/llm.dart';
 import 'package:amy/core/models.dart';
 import 'package:path/path.dart' as p;
 import 'package:amy/core/protocol.dart';
@@ -137,6 +139,38 @@ void main() {
       // Callers normalize first — `..` collapsing escapes the root.
       expect(pathWithinRoots(
           p.normalize('/home/u/Downloads/../secret'), roots), isFalse);
+    });
+  });
+
+  group('LlmConfig', () {
+    test('json round-trip and defaults', () {
+      final c = LlmConfig(
+          baseUrl: 'https://x.test', apiKey: 'k', model: 'm-1');
+      final r = LlmConfig.fromJson(c.toJson());
+      expect(r.baseUrl, 'https://x.test');
+      expect(r.apiKey, 'k');
+      expect(r.model, 'm-1');
+      expect(r.configured, isTrue);
+      expect(LlmConfig.fromJson(null).configured, isFalse);
+      expect(LlmConfig.fromJson({'apiKey': ' ', 'model': ' '}).configured,
+          isFalse);
+    });
+  });
+
+  group('parseBrainAction', () {
+    test('extracts the action object from prose and code fences', () {
+      const fenced = '好的，我来安排。\n```json\n'
+          '{"action":"send","peer":"iPhone","files":["/tmp/a.txt"]}\n```';
+      final a = parseBrainAction(fenced);
+      expect(a?['action'], 'send');
+      expect(a?['peer'], 'iPhone');
+      expect((a?['files'] as List).single, '/tmp/a.txt');
+    });
+
+    test('rejects non-action JSON and plain prose', () {
+      expect(parseBrainAction('{"foo":1}'), isNull);
+      expect(parseBrainAction('没有文件可以发'), isNull);
+      expect(parseBrainAction('{broken'), isNull);
     });
   });
 }

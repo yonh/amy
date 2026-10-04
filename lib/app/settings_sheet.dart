@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_picker/file_picker.dart';
 
 import '../core/identity.dart';
+import '../core/llm.dart';
 import '../core/models.dart';
 import '../state/providers.dart';
 import 'theme.dart';
@@ -96,6 +97,8 @@ class _SettingsSheetState extends ConsumerState<SettingsSheet> {
             _infoRow('协议版本', 'v1 · 局域网明文传输'),
             const SizedBox(height: 20),
             _AiSection(),
+            const SizedBox(height: 20),
+            _BrainSection(),
             const SizedBox(height: 20),
             _ScopeSection(),
           ],
@@ -233,6 +236,143 @@ class _AiSection extends ConsumerWidget {
             style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
           ),
         ],
+      ],
+    );
+  }
+}
+
+/// AI 大脑: the OpenAI-compatible endpoint the in-app assistant talks to.
+class _BrainSection extends ConsumerStatefulWidget {
+  @override
+  ConsumerState<_BrainSection> createState() => _BrainSectionState();
+}
+
+class _BrainSectionState extends ConsumerState<_BrainSection> {
+  late final TextEditingController _url;
+  late final TextEditingController _key;
+  late final TextEditingController _model;
+  String? _probe;
+
+  @override
+  void initState() {
+    super.initState();
+    final c = ref.read(engineProvider).llmConfig;
+    _url = TextEditingController(text: c.baseUrl);
+    _key = TextEditingController(text: c.apiKey);
+    _model = TextEditingController(text: c.model);
+  }
+
+  @override
+  void dispose() {
+    _url.dispose();
+    _key.dispose();
+    _model.dispose();
+    super.dispose();
+  }
+
+  LlmConfig _collect() => LlmConfig(
+        baseUrl: _url.text.trim().isEmpty
+            ? 'https://apihub.agnes-ai.com'
+            : _url.text.trim(),
+        apiKey: _key.text.trim(),
+        model: _model.text.trim().isEmpty
+            ? 'agnes-3.0-flash'
+            : _model.text.trim(),
+      );
+
+  Future<void> _save({bool probe = false}) async {
+    final c = _collect();
+    await ref.read(engineProvider).setLlmConfig(c);
+    if (probe) {
+      setState(() => _probe = '测试中…');
+      final result = await LlmClient(c).probe();
+      if (mounted) setState(() => _probe = result);
+    } else if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('AI 大脑配置已保存')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text('AI 大脑',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+        const SizedBox(height: 4),
+        Text('应用内 AI 助手使用的 OpenAI 兼容接口（密钥只保存在本机）',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _url,
+          decoration: InputDecoration(
+            labelText: 'base_url',
+            isDense: true,
+            border:
+                OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+          style: const TextStyle(fontSize: 13),
+        ),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _key,
+          obscureText: true,
+          enableSuggestions: false,
+          autocorrect: false,
+          decoration: InputDecoration(
+            labelText: 'api_key',
+            isDense: true,
+            border:
+                OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+          style: const TextStyle(fontSize: 13),
+        ),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _model,
+          decoration: InputDecoration(
+            labelText: 'model',
+            isDense: true,
+            border:
+                OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+          style: const TextStyle(fontSize: 13),
+        ),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 6,
+          children: [
+            for (final m in kLlmModelSuggestions)
+              ActionChip(
+                label: Text(m, style: const TextStyle(fontSize: 11)),
+                visualDensity: VisualDensity.compact,
+                onPressed: () => _model.text = m,
+              ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            FilledButton(
+              style:
+                  FilledButton.styleFrom(backgroundColor: AmyTheme.accent),
+              onPressed: () => _save(),
+              child: const Text('保存'),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton(
+              onPressed: () => _save(probe: true),
+              child: const Text('保存并测试连接'),
+            ),
+          ],
+        ),
+        if (_probe != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(_probe!,
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+          ),
       ],
     );
   }

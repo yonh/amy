@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/models.dart';
 import '../state/providers.dart';
+import 'ai_sheet.dart';
 import 'connect_sheet.dart';
 import 'icons.dart';
 import 'plans_sheet.dart';
@@ -104,6 +105,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   '设备',
                   style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
                 ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.smart_toy_outlined,
+                    color: AmyTheme.accent),
+                tooltip: 'AI 助手',
+                onPressed: () => showAiSheet(context),
               ),
               IconButton(
                 icon: const Icon(Icons.schedule_send,
