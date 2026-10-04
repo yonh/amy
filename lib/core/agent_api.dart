@@ -384,6 +384,13 @@ class AgentApi {
 
   Future<void> _setPolicy(HttpRequest req) async {
     final j = jsonDecode(await utf8.decodeStream(req)) as Map<String, dynamic>;
+    // Policy edits are security-critical — always require a human tap even
+    // in auto mode, and deny outright when the agent is off (an agent must
+    // not re-enable or self-escalate).
+    if (!await _gate(req, 'policy', 'agent 请求修改 AI 策略', 0,
+        remote: false, forceConfirm: true)) {
+      return;
+    }
     final p = engine.aiPolicy;
     if (j.containsKey('mode')) {
       p.mode = aiModeFromName(j['mode'] as String?);
@@ -412,6 +419,12 @@ class AgentApi {
   /// Adjusts the filesystem isolation whitelist (local callers only).
   Future<void> _setScope(HttpRequest req) async {
     final j = jsonDecode(await utf8.decodeStream(req)) as Map<String, dynamic>;
+    // Whitelist edits are security-critical — always require a human tap
+    // even in auto mode; an agent must not widen its own sandbox.
+    if (!await _gate(req, 'scope', 'agent 请求修改目录白名单/严格模式', 0,
+        remote: false, forceConfirm: true)) {
+      return;
+    }
     final s = engine.securityScope;
     if (j['dirs'] is List) {
       s.dirs = (j['dirs'] as List)
