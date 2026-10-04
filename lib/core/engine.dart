@@ -328,6 +328,7 @@ class TransferEngine extends ChangeNotifier {
     int bytes, {
     required bool remote,
   }) async {
+    if (aiPolicy.mode == AiMode.off) return false;
     if (remote ||
         aiPolicy.mode == AiMode.ask ||
         (aiPolicy.mode == AiMode.auto &&
@@ -349,7 +350,7 @@ class TransferEngine extends ChangeNotifier {
       notifyListeners();
       return ok;
     }
-    return aiPolicy.mode != AiMode.off;
+    return true;
   }
 
   void answerAgentAction(String id, bool allow) {
@@ -369,29 +370,35 @@ class TransferEngine extends ChangeNotifier {
     List<String> paths, {
     String? token,
   }) async {
-    if (token != null && token.isNotEmpty) {
-      await setRemoteToken(member.fingerprint, token);
-    }
-    final t = _remoteTokens[member.fingerprint];
+    final t = (token != null && token.isNotEmpty)
+        ? token
+        : _remoteTokens[member.fingerprint];
     if (t == null || t.isEmpty) {
       throw StateError('no remote token for ${member.alias} — set it first');
     }
-    return _remoteCall(member, t, 'POST', 'send', {
+    final r = await _remoteCall(member, t, 'POST', 'send', {
       'peer': peerKey,
       'paths': paths,
     });
+    // Persist the credential only once the member has accepted it.
+    if (token != null && token.isNotEmpty) {
+      await setRemoteToken(member.fingerprint, token);
+    }
+    return r;
   }
 
   /// Leader: list recent files on [member]'s device (its downloads dir).
   Future<List<dynamic>> remoteFiles(Peer member, {String? token}) async {
-    if (token != null && token.isNotEmpty) {
-      await setRemoteToken(member.fingerprint, token);
-    }
-    final t = _remoteTokens[member.fingerprint];
+    final t = (token != null && token.isNotEmpty)
+        ? token
+        : _remoteTokens[member.fingerprint];
     if (t == null || t.isEmpty) {
       throw StateError('no remote token for ${member.alias} — set it first');
     }
     final j = await _remoteCall(member, t, 'GET', 'files', null);
+    if (token != null && token.isNotEmpty) {
+      await setRemoteToken(member.fingerprint, token);
+    }
     return (j['files'] as List?) ?? const [];
   }
 

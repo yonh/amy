@@ -141,7 +141,7 @@ class DiscoveryService {
     required String model,
     required String host,
     required int port,
-    bool agentCapable = false,
+    bool? agentCapable,
   }) {
     final existing = _peers[fingerprint];
     final peer = existing ??
@@ -159,7 +159,8 @@ class DiscoveryService {
       ..model = model
       ..host = host
       ..port = port
-      ..agentCapable = agentCapable
+      // Bonjour carries no capability value — keep what /info taught us.
+      ..agentCapable = agentCapable ?? peer.agentCapable
       ..lastSeen = DateTime.now();
     _peers[fingerprint] = peer;
     _peersController.add(Map.of(_peers));

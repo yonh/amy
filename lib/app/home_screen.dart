@@ -417,43 +417,54 @@ class _AgentApprovals extends ConsumerWidget {
               ),
             ],
           ),
-          for (final a in actions)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+          // Cap the card so a burst of pending actions can't push the
+          // buttons below the fold — older entries scroll inside.
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 180),
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (final a in actions)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Row(
                       children: [
-                        Text(a.label,
-                            style: const TextStyle(fontSize: 13),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis),
-                        Text(
-                          '${a.remote ? '主控设备指令 · ' : ''}${fmtBytes(a.bytes)}',
-                          style: TextStyle(
-                              fontSize: 11, color: Colors.grey.shade600),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(a.label,
+                                  style: const TextStyle(fontSize: 13),
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis),
+                              Text(
+                                '${a.remote ? '主控设备指令 · ' : ''}${fmtBytes(a.bytes)}',
+                                style: TextStyle(
+                                    fontSize: 11, color: Colors.grey.shade600),
+                              ),
+                            ],
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () =>
+                              engine.answerAgentAction(a.id, false),
+                          child: const Text('拒绝'),
+                        ),
+                        FilledButton(
+                          style: FilledButton.styleFrom(
+                              backgroundColor: AmyTheme.accent,
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 14)),
+                          onPressed: () =>
+                              engine.answerAgentAction(a.id, true),
+                          child: const Text('允许'),
                         ),
                       ],
                     ),
                   ),
-                  TextButton(
-                    onPressed: () =>
-                        engine.answerAgentAction(a.id, false),
-                    child: const Text('拒绝'),
-                  ),
-                  FilledButton(
-                    style: FilledButton.styleFrom(
-                        backgroundColor: AmyTheme.accent,
-                        padding: const EdgeInsets.symmetric(horizontal: 14)),
-                    onPressed: () =>
-                        engine.answerAgentAction(a.id, true),
-                    child: const Text('允许'),
-                  ),
-                ],
-              ),
+              ],
             ),
+          ),
         ],
       ),
     );

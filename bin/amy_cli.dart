@@ -109,12 +109,7 @@ Future<int> main(List<String> args) async {
           stdout.writeln(
               '${a['id']}  ${a['remote'] == true ? '[主控] ' : ''}${a['label']}');
         }
-        if ((j['actions'] as List).isEmpty) stdout.writeln('（无待审批）');
-      case 'approve':
-        if (rest.length < 2) return _err('用法: approve <id> allow|deny');
-        await api.post(
-            'approve?id=${rest.first}&allow=${rest[1] == 'allow'}', {});
-        stdout.writeln('ok');
+        if ((j['actions'] as List).isEmpty) stdout.writeln('（无待审批 — 审批只能在 app 里点）');
       case 'remote-send':
         final token = _flag(rest, '--token');
         final pos = _positional(rest).toList();
@@ -131,9 +126,10 @@ Future<int> main(List<String> args) async {
         final token = _flag(rest, '--token');
         final pos = _positional(rest).toList();
         if (pos.isEmpty) return _err('用法: remote-files <成员设备> [--token T]');
-        _print(await api.get(
-            'remote-files?member=${Uri.encodeComponent(pos.first)}'
-            '${token != null ? '&token=${Uri.encodeComponent(token)}' : ''}'));
+        _print(await api.post('remote-files', {
+          'member': pos.first,
+          'token': ?token,
+        }));
       default:
         _usage();
         return 1;
@@ -159,9 +155,9 @@ amy_cli — 控制运行中的 amy
   amy answer <id> accept|decline       接受/拒绝对面发来的文件
   amy status <id> / identity           查一条消息/本机信息
   amy policy [mode off|ask|auto] [auto-mb N] [remote on|off] [rotate]  AI 策略
-  amy actions / approve <id> allow|deny   待审批的 AI 操作 / 批准或拒绝
+  amy actions                            待审批的 AI 操作（批准须在 app 里点）
   amy remote-send <成员> <目标> <成员上的路径...> [--token T]  指挥成员设备发送
-  amy remote-files <成员> [--token T]    列出成员设备可发送的文件
+  amy remote-files <成员> [--token T]    列出成员设备可发送的文件（需成员批准）
 ''');
 }
 

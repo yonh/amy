@@ -10,9 +10,9 @@
 //   amy_list_offers                   待确认的传入文件
 //   amy_answer_offer {messageId, accept}
 //   amy_policy {mode?, autoApproveMB?, allowRemoteControl?, rotate?}  AI 策略读/改
-//   amy_list_actions / amy_approve_action {actionId, allow}  AI 待审批
+//   amy_list_actions                    AI 待审批（批准只能在 app UI 里点）
 //   amy_remote_send {member, peer, paths[], token?}  指挥成员设备发送
-//   amy_remote_files {member, token?}  列出成员设备文件
+//   amy_remote_files {member, token?}  列出成员设备文件（需成员批准）
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -118,20 +118,8 @@ const _tools = [
   },
   {
     'name': 'amy_list_actions',
-    'description': '列出等待用户批准的 AI/agent 操作',
+    'description': '列出等待用户批准的 AI/agent 操作（批准/拒绝只能在 app 界面点击，agent 无法代批）',
     'inputSchema': {'type': 'object', 'properties': {}},
-  },
-  {
-    'name': 'amy_approve_action',
-    'description': '批准或拒绝一个待审批的 AI/agent 操作',
-    'inputSchema': {
-      'type': 'object',
-      'properties': {
-        'actionId': {'type': 'string'},
-        'allow': {'type': 'boolean'},
-      },
-      'required': ['actionId', 'allow'],
-    },
   },
   {
     'name': 'amy_remote_send',
@@ -153,7 +141,7 @@ const _tools = [
   },
   {
     'name': 'amy_remote_files',
-    'description': '列出一台成员设备接收目录里的文件（用于挑选要它发送的文件）',
+    'description': '列出一台成员设备接收目录里的文件；成员设备会收到审批卡，批准后才返回清单',
     'inputSchema': {
       'type': 'object',
       'properties': {
@@ -277,9 +265,6 @@ Future<Object?> _callTool(
       return patch.isEmpty ? c.get('policy') : c.post('policy', patch);
     case 'amy_list_actions':
       return c.get('actions');
-    case 'amy_approve_action':
-      return c.post(
-          'approve?id=${a['actionId']}&allow=${a['allow'] == true}', {});
     case 'amy_remote_send':
       return c.post('remote-send', {
         'member': a['member'],
@@ -288,11 +273,10 @@ Future<Object?> _callTool(
         if (a['token'] != null) 'token': a['token'],
       });
     case 'amy_remote_files':
-      final t = a['token'] == null
-          ? ''
-          : '&token=${Uri.encodeComponent(a['token'] as String)}';
-      return c.get(
-          'remote-files?member=${Uri.encodeComponent(a['member'] as String)}$t');
+      return c.post('remote-files', {
+        'member': a['member'],
+        if (a['token'] != null) 'token': a['token'],
+      });
     default:
       throw _RpcError(-32602, 'unknown tool: $name');
   }

@@ -66,7 +66,7 @@ class AgentApi {
             'peers': [for (final p in engine.peers.values) _peerJson(p)],
           });
         case ('GET', 'files'):
-          await _listFiles(req);
+          await _listFiles(req, remote: remote);
         case ('POST', 'stage'):
           await _stage(req);
         case ('POST', 'send'):
@@ -87,8 +87,6 @@ class AgentApi {
               for (final a in engine.pendingAgentActions) a.toJson(),
             ],
           });
-        case ('POST', 'approve'):
-          _approve(req);
         case ('GET', 'plans'):
           _json(req, 200, {
             'plans': [for (final p in engine.plans) p.toJson()],
@@ -107,7 +105,7 @@ class AgentApi {
           await _setPolicy(req);
         case ('POST', 'remote-send'):
           await _remoteSend(req);
-        case ('GET', 'remote-files'):
+        case ('POST', 'remote-files'):
           await _remoteFiles(req);
         default:
           _json(req, 404, {'error': 'unknown agent route: $path'});
@@ -232,8 +230,14 @@ class AgentApi {
   }
 
   /// Recent files in the downloads dir — lets a leader pick what to pull
-  /// (e.g. "把 A 的 a 文件发给 C").
-  Future<void> _listFiles(HttpRequest req) async {
+  /// (e.g. "把 A 的 a 文件发给 C"). Remote callers need a local tap: the
+  /// inventory exposes filenames + absolute paths.
+  Future<void> _listFiles(HttpRequest req, {required bool remote}) async {
+    if (remote &&
+        !await _gate(req, 'files', '主控设备 请求浏览接收目录文件', 0,
+            remote: true)) {
+      return;
+    }
     final entries = <Map<String, dynamic>>[];
     try {
       await for (final e in engine.downloads.list()) {
@@ -281,18 +285,13 @@ class AgentApi {
         msg.totalBytes, remote: false)) {
       return;
     }
-    engine.answerOffer(id, accept);
-    _json(req, 200, {'ok': true});
-  }
-
-  void _approve(HttpRequest req) {
-    final q = req.uri.queryParameters;
-    final id = q['id'];
-    if (id == null) {
-      _json(req, 400, {'error': 'missing id'});
+    // The offer may have expired or been answered while the card sat
+    // open — re-check before reporting success.
+    if (msg.status != MessageStatus.offered) {
+      _json(req, 409, {'error': 'offer no longer pending'});
       return;
     }
-    engine.answerAgentAction(id, q['allow'] == 'true');
+    engine.answerOffer(id, accept);
     _json(req, 200, {'ok': true});
   }
 
@@ -394,15 +393,18 @@ class AgentApi {
     _json(req, 200, result);
   }
 
+  /// POST body carries the member token (never a URL param — query
+  /// strings end up in logs).
   Future<void> _remoteFiles(HttpRequest req) async {
-    final memberKey = req.uri.queryParameters['member'];
+    final j = jsonDecode(await utf8.decodeStream(req)) as Map<String, dynamic>;
+    final memberKey = j['member'] as String?;
     final member = memberKey == null ? null : engine.resolvePeer(memberKey);
     if (member == null) {
       _json(req, 404, {'error': 'member not found: $memberKey'});
       return;
     }
-    final list = await engine.remoteFiles(member,
-        token: req.uri.queryParameters['token']);
+    final list =
+        await engine.remoteFiles(member, token: j['token'] as String?);
     _json(req, 200, {'files': list});
   }
 

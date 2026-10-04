@@ -28,10 +28,10 @@ amy_cli / amy_mcp 会读出 token 并在每个请求里带 `X-Amy-Token` 头—�
 | `GET /offers` / `POST /answer?id=&accept=` | 待确认的传入文件 / 接受或拒绝 |
 | `GET` `POST` `DELETE /plans` | 计划发送列表 / 新建 / 取消 |
 | `GET` `POST /policy` | AI 策略读/改（mode: off/ask/auto、autoApproveMB、allowRemoteControl、rotate） |
-| `GET /actions` `POST /approve?id=&allow=` | 待审批的 AI 操作 / 批准或拒绝 |
-| `GET /files` | 接收目录里最近的文件（供主控挑选） |
+| `GET /actions` | 待审批的 AI 操作列表（批准/拒绝只能在 app UI 点击——agent 不可自批） |
+| `GET /files` | 接收目录里最近的文件（远程调用需成员批准） |
 | `POST /remote-send` `{member, peer, paths, token?}` | 主控：指挥成员设备发送自己的文件 |
-| `GET /remote-files?member=&token=` | 主控：列出成员设备的文件 |
+| `POST /remote-files` `{member, token?}` | 主控：列出成员设备的文件（成员批准后才返回） |
 
 > macOS 沙盒下 app 读不到任意路径——所以 CLI/MCP 一律先经 `/stage` 把字节
 > 推进 app 暂存目录再按路径引用。直接给 `send` 传本机路径在非沙盒平台也可行。
