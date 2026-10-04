@@ -6,8 +6,10 @@ import 'engine.dart';
 import 'files.dart' as files;
 import 'models.dart';
 
-/// Loopback-only HTTP API for local agents: amy_cli and amy_mcp both drive
-/// the running app through this. Everything under /api/v1/agent/* lands here.
+/// HTTP API driving the running app for agents — amy_cli / amy_mcp call it
+/// over loopback (per-run X-Amy-Token), and a leader device may call a
+/// subset remotely when the member enables 允许主控指挥 (Bearer token +
+/// the member's user still approves every remote action).
 class AgentApi {
   AgentApi(this.engine);
 
@@ -15,15 +17,42 @@ class AgentApi {
 
   static const prefix = '/api/v1/agent/';
 
+  /// Remote (non-loopback) callers may only read + instruct sends. Policy
+  /// changes, staging bytes, answering offers and plan control stay local.
+  static const _remoteAllowed = {
+    ('GET', 'identity'),
+    ('GET', 'peers'),
+    ('GET', 'files'),
+    ('GET', 'message'),
+    ('POST', 'send'),
+  };
+
   Future<void> handle(HttpRequest req) async {
-    // Any local process can reach loopback, so a per-run token is required —
-    // it lives in ~/.amy/endpoint.json (chmod 600) where CLI/MCP read it.
-    if (engine.agentToken.isNotEmpty &&
-        req.headers.value('x-amy-token') != engine.agentToken) {
-      _json(req, 403, {'error': 'missing or bad agent token'});
-      return;
+    final addr = req.connectionInfo?.remoteAddress;
+    final remote = addr == null || !addr.isLoopback;
+    if (remote) {
+      // Member side of leader control: enabled flag + Bearer token.
+      final p = engine.aiPolicy;
+      final auth = req.headers.value('authorization') ?? '';
+      if (!p.allowRemoteControl ||
+          p.remoteToken.isEmpty ||
+          auth != 'Bearer ${p.remoteToken}') {
+        _json(req, 403, {'error': 'remote control disabled or bad token'});
+        return;
+      }
+    } else {
+      // Loopback: per-run token from ~/.amy/endpoint.json.
+      if (engine.agentToken.isNotEmpty &&
+          req.headers.value('x-amy-token') != engine.agentToken) {
+        _json(req, 403, {'error': 'missing or bad agent token'});
+        return;
+      }
     }
     final path = req.uri.path.substring(prefix.length);
+    if (remote && !_remoteAllowed.contains((req.method, path))) {
+      _json(req, 403, {'error': 'not allowed for remote callers'});
+      return;
+    }
     try {
       switch ((req.method, path)) {
         case ('GET', 'identity'):
@@ -36,10 +65,12 @@ class AgentApi {
           _json(req, 200, {
             'peers': [for (final p in engine.peers.values) _peerJson(p)],
           });
+        case ('GET', 'files'):
+          await _listFiles(req, remote: remote);
         case ('POST', 'stage'):
           await _stage(req);
         case ('POST', 'send'):
-          await _send(req);
+          await _send(req, remote: remote);
         case ('GET', 'message'):
           _message(req);
         case ('GET', 'offers'):
@@ -49,7 +80,13 @@ class AgentApi {
             ],
           });
         case ('POST', 'answer'):
-          _answer(req);
+          await _answer(req);
+        case ('GET', 'actions'):
+          _json(req, 200, {
+            'actions': [
+              for (final a in engine.pendingAgentActions) a.toJson(),
+            ],
+          });
         case ('GET', 'plans'):
           _json(req, 200, {
             'plans': [for (final p in engine.plans) p.toJson()],
@@ -57,7 +94,19 @@ class AgentApi {
         case ('POST', 'plans'):
           await _addPlan(req);
         case ('DELETE', 'plans'):
-          _cancelPlan(req);
+          await _cancelPlan(req);
+        case ('GET', 'policy'):
+          _json(req, 200, {
+            'policy': engine.aiPolicy.toPublicJson(),
+            if (!remote) 'remoteToken': engine.aiPolicy.remoteToken,
+            'agentCapable': engine.identity.agentCapable,
+          });
+        case ('POST', 'policy'):
+          await _setPolicy(req);
+        case ('POST', 'remote-send'):
+          await _remoteSend(req);
+        case ('POST', 'remote-files'):
+          await _remoteFiles(req);
         default:
           _json(req, 404, {'error': 'unknown agent route: $path'});
       }
@@ -71,7 +120,27 @@ class AgentApi {
         'online': p.online,
       };
 
-  Future<void> _send(HttpRequest req) async {
+  /// Gate a mutating call through the AI policy. Returns false (with the
+  /// response already written) when denied or unanswered.
+  Future<bool> _gate(
+    HttpRequest req,
+    String kind,
+    String label,
+    int bytes, {
+    required bool remote,
+  }) async {
+    final ok =
+        await engine.agentApprove(kind, label, bytes, remote: remote);
+    if (!ok) {
+      _json(req, 403, {
+        'error': 'action denied',
+        'hint': '用户未批准或 AI 模式为关闭',
+      });
+    }
+    return ok;
+  }
+
+  Future<void> _send(HttpRequest req, {required bool remote}) async {
     final j = jsonDecode(await utf8.decodeStream(req)) as Map<String, dynamic>;
     final key = j['peer'] as String?;
     if (key == null) {
@@ -83,9 +152,9 @@ class AgentApi {
       _json(req, 404, {'error': 'peer not found: $key'});
       return;
     }
-    final files = _materialize(j);
-    if (files.error != null) {
-      _json(req, 400, {'error': files.error});
+    final materialized = _materialize(j);
+    if (materialized.error != null) {
+      _json(req, 400, {'error': materialized.error});
       return;
     }
     if (!peer.online) {
@@ -95,7 +164,15 @@ class AgentApi {
       });
       return;
     }
-    final msg = await engine.sendFiles(peer, files.files!);
+    final fs = materialized.files!;
+    final total = fs.fold(0, (s, f) => s + f.size);
+    final names = fs.map((f) => f.name).join(', ');
+    final who = remote ? '主控设备' : 'agent';
+    if (!await _gate(req, 'send', '$who 请求发送 $names 给 ${peer.alias}',
+        total, remote: remote)) {
+      return;
+    }
+    final msg = await engine.sendFiles(peer, fs);
     _json(req, 200, {'message': msg.toJson()});
   }
 
@@ -129,6 +206,13 @@ class AgentApi {
   Future<void> _stage(HttpRequest req) async {
     final name = files.sanitizeFileName(
         req.uri.queryParameters['name'] ?? 'file');
+    // Staging only writes into the app's own staging dir and can't trigger a
+    // send by itself, so it doesn't warrant an approval card — but AI mode
+    // off still refuses it.
+    if (engine.aiPolicy.mode == AiMode.off) {
+      _json(req, 403, {'error': 'AI mode is off'});
+      return;
+    }
     final dir = await files.stagingDir();
     final dest = '${dir.path}/${randomId(4)}-$name';
     final sink = File(dest).openWrite();
@@ -145,6 +229,34 @@ class AgentApi {
     _json(req, 200, {'path': dest, 'size': size});
   }
 
+  /// Recent files in the downloads dir — lets a leader pick what to pull
+  /// (e.g. "把 A 的 a 文件发给 C"). Remote callers need a local tap: the
+  /// inventory exposes filenames + absolute paths.
+  Future<void> _listFiles(HttpRequest req, {required bool remote}) async {
+    if (remote &&
+        !await _gate(req, 'files', '主控设备 请求浏览接收目录文件', 0,
+            remote: true)) {
+      return;
+    }
+    final entries = <Map<String, dynamic>>[];
+    try {
+      await for (final e in engine.downloads.list()) {
+        if (e is File) {
+          final st = await e.stat();
+          entries.add({
+            'name': e.path.split(Platform.pathSeparator).last,
+            'path': e.path,
+            'size': st.size,
+            'modified': st.modified.toIso8601String(),
+          });
+        }
+      }
+    } catch (_) {}
+    entries.sort((a, b) =>
+        (b['modified'] as String).compareTo(a['modified'] as String));
+    _json(req, 200, {'files': entries.take(50).toList()});
+  }
+
   void _message(HttpRequest req) {
     final id = req.uri.queryParameters['id'];
     final msg = id == null ? null : engine.messageById(id);
@@ -155,7 +267,7 @@ class AgentApi {
     _json(req, 200, {'message': msg.toJson()});
   }
 
-  void _answer(HttpRequest req) {
+  Future<void> _answer(HttpRequest req) async {
     final q = req.uri.queryParameters;
     final id = q['id'];
     final accept = q['accept'] == 'true';
@@ -166,6 +278,17 @@ class AgentApi {
     final msg = engine.messageById(id);
     if (msg == null || msg.status != MessageStatus.offered) {
       _json(req, 404, {'error': 'no pending offer with that id'});
+      return;
+    }
+    if (!await _gate(req, 'answer',
+        'agent 请求${accept ? '接受' : '拒绝'}来自 ${msg.peerId} 的 ${msg.files.length} 个文件',
+        msg.totalBytes, remote: false)) {
+      return;
+    }
+    // The offer may have expired or been answered while the card sat
+    // open — re-check before reporting success.
+    if (msg.status != MessageStatus.offered) {
+      _json(req, 409, {'error': 'offer no longer pending'});
       return;
     }
     engine.answerOffer(id, accept);
@@ -180,11 +303,14 @@ class AgentApi {
       _json(req, 404, {'error': 'peer not found: $key'});
       return;
     }
-    final files = _materialize(j);
-    if (files.error != null) {
-      _json(req, 400, {'error': files.error});
+    final materialized = _materialize(j);
+    if (materialized.error != null) {
+      _json(req, 400, {'error': materialized.error});
       return;
     }
+    final fs = materialized.files!;
+    // Validate before the approval gate — a bad timestamp must not wait on
+    // (or be masked by) a 60s approval card.
     final rawRunAt = j['runAt'];
     DateTime? runAt;
     if (rawRunAt != null) {
@@ -195,19 +321,93 @@ class AgentApi {
         return;
       }
     }
-    final plan = engine.createPlan(peer, files.files!.map((f) => f.path!).toList(),
+    final total = fs.fold(0, (s, f) => s + f.size);
+    if (!await _gate(req, 'plan',
+        'agent 请求创建计划发送给 ${peer.alias}', total, remote: false)) {
+      return;
+    }
+    final plan = engine.createPlan(peer, fs.map((f) => f.path!).toList(),
         runAt: runAt?.toLocal());
     _json(req, 200, {'plan': plan.toJson()});
   }
 
-  void _cancelPlan(HttpRequest req) {
+  Future<void> _cancelPlan(HttpRequest req) async {
     final id = req.uri.queryParameters['id'];
     if (id == null) {
       _json(req, 400, {'error': 'missing id'});
       return;
     }
+    if (!await _gate(req, 'cancel-plan', 'agent 请求取消计划 $id', 0,
+        remote: false)) {
+      return;
+    }
     engine.cancelPlan(id);
     _json(req, 200, {'ok': true});
+  }
+
+  Future<void> _setPolicy(HttpRequest req) async {
+    final j = jsonDecode(await utf8.decodeStream(req)) as Map<String, dynamic>;
+    final p = engine.aiPolicy;
+    if (j.containsKey('mode')) {
+      p.mode = aiModeFromName(j['mode'] as String?);
+    }
+    if (j['autoApproveMB'] != null) {
+      p.autoApproveBytes =
+          (j['autoApproveMB'] as num).toInt() * 1024 * 1024;
+    }
+    if (j.containsKey('allowRemoteControl')) {
+      p.allowRemoteControl = j['allowRemoteControl'] == true;
+      // Enabling with no token mints one; disabling keeps it for re-enable.
+      if (p.allowRemoteControl && p.remoteToken.isEmpty) {
+        p.remoteToken = randomId(16);
+      }
+    }
+    if (j['rotate'] == true) {
+      p.remoteToken = randomId(16);
+    }
+    await engine.setAiPolicy(p);
+    _json(req, 200, {
+      'policy': p.toPublicJson(),
+      'remoteToken': p.remoteToken,
+    });
+  }
+
+  /// Leader instruction: member sends member-local [paths] to [peer].
+  Future<void> _remoteSend(HttpRequest req) async {
+    final j = jsonDecode(await utf8.decodeStream(req)) as Map<String, dynamic>;
+    final memberKey = j['member'] as String?;
+    final peerKey = j['peer'] as String?;
+    final paths = (j['paths'] as List? ?? const [])
+        .map((e) => e.toString())
+        .where((x) => x.isNotEmpty)
+        .toList();
+    final member = memberKey == null ? null : engine.resolvePeer(memberKey);
+    if (member == null) {
+      _json(req, 404, {'error': 'member not found: $memberKey'});
+      return;
+    }
+    if (peerKey == null || paths.isEmpty) {
+      _json(req, 400, {'error': 'missing "peer" or "paths"'});
+      return;
+    }
+    final result = await engine.remoteSend(member, peerKey, paths,
+        token: j['token'] as String?);
+    _json(req, 200, result);
+  }
+
+  /// POST body carries the member token (never a URL param — query
+  /// strings end up in logs).
+  Future<void> _remoteFiles(HttpRequest req) async {
+    final j = jsonDecode(await utf8.decodeStream(req)) as Map<String, dynamic>;
+    final memberKey = j['member'] as String?;
+    final member = memberKey == null ? null : engine.resolvePeer(memberKey);
+    if (member == null) {
+      _json(req, 404, {'error': 'member not found: $memberKey'});
+      return;
+    }
+    final list =
+        await engine.remoteFiles(member, token: j['token'] as String?);
+    _json(req, 200, {'files': list});
   }
 
   void _json(HttpRequest req, int status, Map<String, dynamic> body) {

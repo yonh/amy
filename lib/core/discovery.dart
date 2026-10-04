@@ -141,6 +141,7 @@ class DiscoveryService {
     required String model,
     required String host,
     required int port,
+    bool? agentCapable,
   }) {
     final existing = _peers[fingerprint];
     final peer = existing ??
@@ -158,6 +159,8 @@ class DiscoveryService {
       ..model = model
       ..host = host
       ..port = port
+      // Bonjour carries no capability value — keep what /info taught us.
+      ..agentCapable = agentCapable ?? peer.agentCapable
       ..lastSeen = DateTime.now();
     _peers[fingerprint] = peer;
     _peersController.add(Map.of(_peers));
@@ -284,6 +287,7 @@ class DiscoveryService {
         model: (j['model'] as String?) ?? '',
         host: host,
         port: (j['port'] as num?)?.toInt() ?? port,
+        agentCapable: j['agentCapable'] == true,
       );
       unawaited(_checkPendingCode(peer));
       return peer;
@@ -363,6 +367,7 @@ class DiscoveryService {
       model: (info['model'] as String?) ?? '',
       host: host,
       port: (info['port'] as num?)?.toInt() ?? kBasePort,
+      agentCapable: info['agentCapable'] == true,
     );
   }
 

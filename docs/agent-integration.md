@@ -1,8 +1,22 @@
 # Agent 接入 amy
 
 运行中的 amy 暴露一个**仅 loopback** 的 Agent API（`http://127.0.0.1:<port>/api/v1/agent/*`，
-非本机来源一律 403）。端口和每次运行的 `token` 写入 `~/.amy/endpoint.json`（chmod 600）；
+非本机来源改走主控鉴权）。端口和每次运行的 `token` 写入 `~/.amy/endpoint.json`（chmod 600；
+沙盒 macOS 应用写在 `~/Library/Containers/com.yonh.amy/Data/.amy/endpoint.json`）；
 amy_cli / amy_mcp 会读出 token 并在每个请求里带 `X-Amy-Token` 头——光有端口无法驱动应用。
+
+## 主控（leader）远程指挥
+
+成员设备在设置里开启「允许主控设备指挥本机」后生成 `remoteToken`。主控设备把它存为成员的凭据，
+之后可带 `Authorization: Bearer <remoteToken>` 调上述 API 的一个子集（identity / peers / files / message / send）。
+**远程指令永远需要成员本机逐次确认**——成员的 UI 会弹出审批卡，60 秒不批即拒绝。
+
+## AI 策略（三档）
+
+- `off`：拒绝所有改动类 agent 调用（send/plans/answer/stage）
+- `ask`（默认）：每个改动类调用弹本机审批卡，60s 不批即拒绝
+- `auto`：小文件自动放行；发送总量超过 `autoApproveBytes`（默认 32MB）仍需确认。
+  远程（主控）指令不受 auto 豁免——永远需确认。
 
 | 端点 | 说明 |
 | --- | --- |
@@ -13,6 +27,11 @@ amy_cli / amy_mcp 会读出 token 并在每个请求里带 `X-Amy-Token` 头—�
 | `GET /message?id=` | 传输状态/进度 |
 | `GET /offers` / `POST /answer?id=&accept=` | 待确认的传入文件 / 接受或拒绝 |
 | `GET` `POST` `DELETE /plans` | 计划发送列表 / 新建 / 取消 |
+| `GET` `POST /policy` | AI 策略读/改（mode: off/ask/auto、autoApproveMB、allowRemoteControl、rotate） |
+| `GET /actions` | 待审批的 AI 操作列表（批准/拒绝只能在 app UI 点击——agent 不可自批） |
+| `GET /files` | 接收目录里最近的文件（远程调用需成员批准） |
+| `POST /remote-send` `{member, peer, paths, token?}` | 主控：指挥成员设备发送自己的文件 |
+| `POST /remote-files` `{member, token?}` | 主控：列出成员设备的文件（成员批准后才返回） |
 
 > macOS 沙盒下 app 读不到任意路径——所以 CLI/MCP 一律先经 `/stage` 把字节
 > 推进 app 暂存目录再按路径引用。直接给 `send` 传本机路径在非沙盒平台也可行。

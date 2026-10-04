@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:device_info_plus/device_info_plus.dart';
@@ -24,6 +25,9 @@ class SelfIdentity {
 
   int port = kBasePort;
 
+  /// Advertised when this device's remote agent API accepts leader calls.
+  bool agentCapable = false;
+
   String get code => pairCode(fingerprint);
 
   Map<String, dynamic> infoJson() => {
@@ -33,6 +37,7 @@ class SelfIdentity {
         'platform': platformName(platform),
         'model': model,
         'port': port,
+        'agentCapable': agentCapable,
       };
 }
 
@@ -100,4 +105,37 @@ Future<bool> isOnboarded() async {
 Future<void> markOnboarded() async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.setBool('onboarded', true);
+}
+
+/// AI/agent safety policy — persisted under 'ai.policy'.
+Future<AiPolicy> loadAiPolicy() async {
+  final prefs = await SharedPreferences.getInstance();
+  final raw = prefs.getString('ai.policy');
+  if (raw == null) return AiPolicy();
+  try {
+    return AiPolicy.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+  } catch (_) {
+    return AiPolicy();
+  }
+}
+
+Future<void> saveAiPolicy(AiPolicy p) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setString('ai.policy', jsonEncode(p.toJson()));
+}
+
+/// Leader-side: remote tokens remembered per member fingerprint.
+Future<Map<String, String>> loadRemoteTokens() async {
+  final prefs = await SharedPreferences.getInstance();
+  try {
+    return (jsonDecode(prefs.getString('ai.remoteTokens') ?? '{}') as Map)
+        .cast<String, String>();
+  } catch (_) {
+    return {};
+  }
+}
+
+Future<void> saveRemoteTokens(Map<String, String> tokens) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setString('ai.remoteTokens', jsonEncode(tokens));
 }
