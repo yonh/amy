@@ -556,13 +556,30 @@ class TransferEngine extends ChangeNotifier {
       f.path = savedTo;
     }
     _saveReservations.remove('${s.id}:$fileId');
+    // The sender aborts the whole message on any failed file, so files
+    // still queued will never arrive — skip them and settle now.
+    if (savedTo.isEmpty) {
+      for (final x in s.files.values) {
+        if (x.status != FileStatus.done && x.status != FileStatus.failed) {
+          x.status = FileStatus.skipped;
+        }
+      }
+    }
     final allDone = s.files.values.every(
-      (x) => x.status == FileStatus.done || x.status == FileStatus.failed,
+      (x) =>
+          x.status == FileStatus.done ||
+          x.status == FileStatus.failed ||
+          x.status == FileStatus.skipped,
     );
     if (allDone && msg != null) {
-      final anyOk = s.files.values.any((x) => x.status == FileStatus.done);
-      msg.status = anyOk ? MessageStatus.done : MessageStatus.failed;
+      final ok = s.files.values.where((x) => x.status == FileStatus.done);
+      final allOk = ok.length == s.files.length;
+      msg.status = allOk ? MessageStatus.done : MessageStatus.failed;
+      if (!allOk && ok.isNotEmpty) {
+        msg.error = '部分文件失败（${ok.length}/${s.files.length} 已接收）';
+      }
       _watchdogs.remove(s.id)?.cancel();
+      _saveReservations.removeWhere((k, _) => k.startsWith('${s.id}:'));
       server.sessions.remove(s.id);
     } else if (msg != null && !msg.terminal) {
       // Next file's clock starts now — without this the sender could stall

@@ -185,8 +185,16 @@ class AgentApi {
       _json(req, 400, {'error': files.error});
       return;
     }
-    final runAt =
-        j['runAt'] == null ? null : DateTime.tryParse(j['runAt'] as String);
+    final rawRunAt = j['runAt'];
+    DateTime? runAt;
+    if (rawRunAt != null) {
+      runAt = rawRunAt is String ? DateTime.tryParse(rawRunAt) : null;
+      if (runAt == null) {
+        // Never fall back to "on online" — a typo would send immediately.
+        _json(req, 400, {'error': 'invalid runAt (expect ISO8601): $rawRunAt'});
+        return;
+      }
+    }
     final plan = engine.createPlan(peer, files.files!.map((f) => f.path!).toList(),
         runAt: runAt?.toLocal());
     _json(req, 200, {'plan': plan.toJson()});

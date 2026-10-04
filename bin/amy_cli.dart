@@ -134,10 +134,13 @@ String? _flag(List<String> args, String name) {
   return null;
 }
 
+/// Flags that take no value — must not swallow the following argument.
+const _boolFlags = {'--online'};
+
 Iterable<String> _positional(List<String> args) sync* {
   for (var i = 0; i < args.length; i++) {
     if (args[i].startsWith('--')) {
-      i++;
+      if (!_boolFlags.contains(args[i])) i++;
       continue;
     }
     yield args[i];
