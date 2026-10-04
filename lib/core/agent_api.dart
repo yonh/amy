@@ -139,13 +139,17 @@ class AgentApi {
   }) async {
     final ok = await engine.agentApprove(kind, label, bytes,
         remote: remote, forceConfirm: forceConfirm);
-    if (!ok) {
+    // TOCTOU: the policy may have been switched off while the card waited —
+    // re-check at resolution time so a stale approval can't apply anyway.
+    final stillOn = ok && engine.aiPolicy.mode != AiMode.off;
+    if (!ok || !stillOn) {
       _json(req, 403, {
         'error': 'action denied',
         'hint': '用户未批准或 AI 模式为关闭',
       });
+      return false;
     }
-    return ok;
+    return true;
   }
 
   Future<void> _send(HttpRequest req, {required bool remote}) async {
@@ -386,9 +390,18 @@ class AgentApi {
     final j = jsonDecode(await utf8.decodeStream(req)) as Map<String, dynamic>;
     // Policy edits are security-critical — always require a human tap even
     // in auto mode, and deny outright when the agent is off (an agent must
-    // not re-enable or self-escalate).
-    if (!await _gate(req, 'policy', 'agent 请求修改 AI 策略', 0,
-        remote: false, forceConfirm: true)) {
+    // not re-enable or self-escalate). The card names the concrete changes
+    // so the approver sees exactly what is being granted.
+    final changes = <String>[
+      if (j.containsKey('mode')) 'mode→${j['mode']}',
+      if (j['autoApproveMB'] != null) 'autoApproveMB→${j['autoApproveMB']}',
+      if (j.containsKey('allowRemoteControl'))
+        'allowRemoteControl→${j['allowRemoteControl']}',
+      if (j['rotate'] == true) 'rotate token',
+    ];
+    if (!await _gate(req, 'policy',
+        'agent 请求修改 AI 策略：${changes.isEmpty ? '(无变更)' : changes.join(', ')}',
+        0, remote: false, forceConfirm: true)) {
       return;
     }
     final p = engine.aiPolicy;
@@ -420,9 +433,17 @@ class AgentApi {
   Future<void> _setScope(HttpRequest req) async {
     final j = jsonDecode(await utf8.decodeStream(req)) as Map<String, dynamic>;
     // Whitelist edits are security-critical — always require a human tap
-    // even in auto mode; an agent must not widen its own sandbox.
-    if (!await _gate(req, 'scope', 'agent 请求修改目录白名单/严格模式', 0,
-        remote: false, forceConfirm: true)) {
+    // even in auto mode; an agent must not widen its own sandbox. The card
+    // names the concrete changes so the approver sees the exact grant.
+    final changes = <String>[
+      if (j['dirs'] is List) 'dirs=${(j['dirs'] as List).join(', ')}',
+      if (j['add'] is String) '+${j['add']}',
+      if (j['remove'] is String) '-${j['remove']}',
+      if (j.containsKey('strict')) 'strict→${j['strict']}',
+    ];
+    if (!await _gate(req, 'scope',
+        'agent 请求修改目录白名单：${changes.isEmpty ? '(无变更)' : changes.join(', ')}',
+        0, remote: false, forceConfirm: true)) {
       return;
     }
     final s = engine.securityScope;
