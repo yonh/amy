@@ -47,6 +47,16 @@ class AiBrain {
     final peers = engine.peers.values.toList()
       ..sort((a, b) => (b.online ? 1 : 0).compareTo(a.online ? 1 : 0));
     final roots = await engine.allowedRoots();
+    // Let the model resolve bare filenames ("把 ai-test.txt 发给 x") to
+    // real paths instead of guessing — recent received files are the
+    // most likely send candidates.
+    final recent = <String>[];
+    try {
+      await for (final e in engine.downloads.list()) {
+        if (e is File) recent.add(e.path);
+      }
+    } catch (_) {}
+    recent.sort();
     final s = StringBuffer()
       ..writeln('你是文件传输应用 amy 的内置助手，把用户的中文/英文指令翻译成')
       ..writeln('一个 JSON 动作。只输出 JSON 对象，不要输出其他文字或代码块。')
@@ -65,6 +75,12 @@ class AiBrain {
       ..writeln('{"action":"clarify","question":"<追问>"}   信息不足')
       ..writeln('规则: 发送文件只允许使用这些目录内的文件: ${roots.join(' | ')}。')
       ..writeln('用户没给出明确文件名时不要猜路径，用 clarify 追问。');
+    if (recent.isNotEmpty) {
+      s.writeln('接收目录最近的文件:');
+      for (final r in recent.reversed.take(20)) {
+        s.writeln('- $r');
+      }
+    }
     return s.toString();
   }
 
