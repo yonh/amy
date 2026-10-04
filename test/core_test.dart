@@ -98,4 +98,23 @@ void main() {
       expect(p.baseUri.toString(), 'http://1.2.3.4:47777');
     });
   });
+
+  group('AiPolicy', () {
+    test('json round-trip preserves mode, threshold and remote flag', () {
+      final p = AiPolicy(
+        mode: AiMode.auto,
+        autoApproveBytes: 128 * 1024 * 1024,
+        allowRemoteControl: true,
+        remoteToken: 'tok123',
+      );
+      final r = AiPolicy.fromJson(p.toJson());
+      expect(r.mode, AiMode.auto);
+      expect(r.autoApproveBytes, 128 * 1024 * 1024);
+      expect(r.allowRemoteControl, isTrue);
+      expect(r.remoteToken, 'tok123');
+      // Public view never leaks the token value.
+      expect(p.toPublicJson().containsKey('remoteToken'), isFalse);
+      expect(p.toPublicJson()['remoteTokenSet'], isTrue);
+    });
+  });
 }

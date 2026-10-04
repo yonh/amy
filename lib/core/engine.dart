@@ -56,6 +56,15 @@ class TransferEngine extends ChangeNotifier {
   String get agentToken => _agentToken;
   String _agentToken = '';
 
+  /// AI/agent safety policy (persisted in SharedPreferences).
+  AiPolicy aiPolicy = AiPolicy();
+
+  /// Leader-side: member fingerprint -> remote Bearer token.
+  Map<String, String> _remoteTokens = {};
+
+  /// Pending AI/agent actions awaiting the user's tap.
+  final _approvals = <String, AgentAction>{};
+
   bool ready = false;
   String? lastError;
 
@@ -82,6 +91,9 @@ class TransferEngine extends ChangeNotifier {
     );
     identity.port = await server.start();
     await discovery.start();
+    aiPolicy = await loadAiPolicy();
+    _remoteTokens = await loadRemoteTokens();
+    identity.agentCapable = aiPolicy.allowRemoteControl;
     _agentToken = randomId(16);
     unawaited(_writeAgentEndpoint());
     unawaited(files.pruneStaging(keep: {
@@ -267,6 +279,153 @@ class TransferEngine extends ChangeNotifier {
   }
 
   TransferMessage? messageById(String id) => _findMessage(id);
+
+  // ------------------------------------------------------------ AI 控制
+
+  /// Pending AI/agent actions waiting for the user's decision.
+  List<AgentAction> get pendingAgentActions =>
+      _approvals.values.toList(growable: false)
+        ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
+  Future<void> setAiPolicy(AiPolicy p) async {
+    // Enabling remote control always implies a token exists to mint against.
+    if (p.allowRemoteControl && p.remoteToken.isEmpty) {
+      p.remoteToken = randomId(16);
+    }
+    aiPolicy = p;
+    identity.agentCapable = p.allowRemoteControl;
+    await saveAiPolicy(p);
+    notifyListeners();
+  }
+
+  /// Rotates the remote token; returns the new one.
+  Future<String> rotateRemoteToken() async {
+    aiPolicy.remoteToken = randomId(16);
+    await setAiPolicy(aiPolicy);
+    return aiPolicy.remoteToken;
+  }
+
+  String? remoteTokenFor(String fp) => _remoteTokens[fp];
+
+  Future<void> setRemoteToken(String fp, String token) async {
+    if (token.isEmpty) {
+      _remoteTokens.remove(fp);
+    } else {
+      _remoteTokens[fp] = token;
+    }
+    await saveRemoteTokens(_remoteTokens);
+  }
+
+  /// Decides whether an agent action may proceed.
+  ///  - remote (leader-instructed) calls ALWAYS need the user's tap;
+  ///  - mode off refuses outright;
+  ///  - ask requires a tap;
+  ///  - auto passes unless the transfer exceeds autoApproveBytes.
+  /// Approval waits up to 60s; unanswered = denied.
+  Future<bool> agentApprove(
+    String kind,
+    String label,
+    int bytes, {
+    required bool remote,
+  }) async {
+    if (remote ||
+        aiPolicy.mode == AiMode.ask ||
+        (aiPolicy.mode == AiMode.auto &&
+            kind == 'send' &&
+            bytes > aiPolicy.autoApproveBytes)) {
+      final a = AgentAction(
+        id: randomId(),
+        kind: kind,
+        label: label,
+        bytes: bytes,
+        remote: remote,
+        decision: Completer<bool>(),
+      );
+      _approvals[a.id] = a;
+      notifyListeners();
+      final ok = await a.decision.future
+          .timeout(const Duration(seconds: 60), onTimeout: () => false);
+      _approvals.remove(a.id);
+      notifyListeners();
+      return ok;
+    }
+    return aiPolicy.mode != AiMode.off;
+  }
+
+  void answerAgentAction(String id, bool allow) {
+    final a = _approvals.remove(id);
+    if (a != null && !a.decision.isCompleted) {
+      a.decision.complete(allow);
+    }
+    notifyListeners();
+  }
+
+  /// Leader orchestration: ask [member] to send [paths] (member-local
+  /// absolute paths) to the peer named [peerKey]. Returns the member's
+  /// response body. The member still requires its own user's approval.
+  Future<Map<String, dynamic>> remoteSend(
+    Peer member,
+    String peerKey,
+    List<String> paths, {
+    String? token,
+  }) async {
+    if (token != null && token.isNotEmpty) {
+      await setRemoteToken(member.fingerprint, token);
+    }
+    final t = _remoteTokens[member.fingerprint];
+    if (t == null || t.isEmpty) {
+      throw StateError('no remote token for ${member.alias} — set it first');
+    }
+    return _remoteCall(member, t, 'POST', 'send', {
+      'peer': peerKey,
+      'paths': paths,
+    });
+  }
+
+  /// Leader: list recent files on [member]'s device (its downloads dir).
+  Future<List<dynamic>> remoteFiles(Peer member, {String? token}) async {
+    if (token != null && token.isNotEmpty) {
+      await setRemoteToken(member.fingerprint, token);
+    }
+    final t = _remoteTokens[member.fingerprint];
+    if (t == null || t.isEmpty) {
+      throw StateError('no remote token for ${member.alias} — set it first');
+    }
+    final j = await _remoteCall(member, t, 'GET', 'files', null);
+    return (j['files'] as List?) ?? const [];
+  }
+
+  Future<Map<String, dynamic>> _remoteCall(
+    Peer member,
+    String token,
+    String method,
+    String path,
+    Map<String, dynamic>? body,
+  ) async {
+    final c = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+    try {
+      final req = await c.openUrl(
+        method,
+        member.baseUri.replace(path: '${AgentApi.prefix}$path'),
+      );
+      req.headers.set('authorization', 'Bearer $token');
+      if (body != null) {
+        req.headers.contentType = ContentType.json;
+        req.write(jsonEncode(body));
+      }
+      // Approval on the member can take up to 60s — wait longer.
+      final res = await req.close().timeout(const Duration(seconds: 90));
+      final text = await utf8.decodeStream(res);
+      final j = jsonDecode(text.isEmpty ? '{}' : text);
+      if (res.statusCode >= 300) {
+        throw StateError(
+            '${member.alias} ${res.statusCode}: ${(j as Map)['error'] ?? text}');
+      }
+      return (j as Map).cast<String, dynamic>();
+    } finally {
+      c.close();
+    }
+  }
 
   /// Incoming offers still waiting for the user's answer.
   List<TransferMessage> get pendingOffers => [

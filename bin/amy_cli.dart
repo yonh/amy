@@ -81,6 +81,59 @@ Future<int> main(List<String> args) async {
         if (rest.isEmpty) return _err('用法: unplan <planId>');
         await api.delete('plans?id=${rest.first}');
         stdout.writeln('ok');
+      case 'policy':
+        if (rest.isEmpty) {
+          _print(await api.get('policy'));
+          break;
+        }
+        switch (rest.first) {
+          case 'mode':
+            if (rest.length < 2) return _err('用法: policy mode off|ask|auto');
+            _print(await api.post('policy', {'mode': rest[1]}));
+          case 'auto-mb':
+            if (rest.length < 2) return _err('用法: policy auto-mb <MB>');
+            _print(await api.post(
+                'policy', {'autoApproveMB': int.parse(rest[1])}));
+          case 'remote':
+            if (rest.length < 2) return _err('用法: policy remote on|off');
+            _print(await api.post(
+                'policy', {'allowRemoteControl': rest[1] == 'on'}));
+          case 'rotate':
+            _print(await api.post('policy', {'rotate': true}));
+          default:
+            return _err('用法: policy [mode|auto-mb|remote|rotate] ...');
+        }
+      case 'actions':
+        final j = await api.get('actions');
+        for (final a in (j['actions'] as List).cast<Map<String, dynamic>>()) {
+          stdout.writeln(
+              '${a['id']}  ${a['remote'] == true ? '[主控] ' : ''}${a['label']}');
+        }
+        if ((j['actions'] as List).isEmpty) stdout.writeln('（无待审批）');
+      case 'approve':
+        if (rest.length < 2) return _err('用法: approve <id> allow|deny');
+        await api.post(
+            'approve?id=${rest.first}&allow=${rest[1] == 'allow'}', {});
+        stdout.writeln('ok');
+      case 'remote-send':
+        final token = _flag(rest, '--token');
+        final pos = _positional(rest).toList();
+        if (pos.length < 3) {
+          return _err('用法: remote-send <成员设备> <目标设备> <成员上的文件路径...> [--token T]');
+        }
+        _print(await api.post('remote-send', {
+          'member': pos[0],
+          'peer': pos[1],
+          'paths': pos.sublist(2),
+          'token': ?token,
+        }));
+      case 'remote-files':
+        final token = _flag(rest, '--token');
+        final pos = _positional(rest).toList();
+        if (pos.isEmpty) return _err('用法: remote-files <成员设备> [--token T]');
+        _print(await api.get(
+            'remote-files?member=${Uri.encodeComponent(pos.first)}'
+            '${token != null ? '&token=${Uri.encodeComponent(token)}' : ''}'));
       default:
         _usage();
         return 1;
@@ -105,6 +158,10 @@ amy_cli — 控制运行中的 amy
   amy offers                           待你确认的传入文件
   amy answer <id> accept|decline       接受/拒绝对面发来的文件
   amy status <id> / identity           查一条消息/本机信息
+  amy policy [mode off|ask|auto] [auto-mb N] [remote on|off] [rotate]  AI 策略
+  amy actions / approve <id> allow|deny   待审批的 AI 操作 / 批准或拒绝
+  amy remote-send <成员> <目标> <成员上的路径...> [--token T]  指挥成员设备发送
+  amy remote-files <成员> [--token T]    列出成员设备可发送的文件
 ''');
 }
 

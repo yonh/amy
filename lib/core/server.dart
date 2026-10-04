@@ -128,9 +128,10 @@ class AmyServer {
       } else if (req.method == 'POST' && path == kVerifyCodePath) {
         await _verifyCode(req);
       } else if (path.startsWith(AgentApi.prefix)) {
-        final remote = req.connectionInfo?.remoteAddress;
-        if (onAgent == null || remote == null || !remote.isLoopback) {
-          _json(req, 403, {'error': 'agent api is loopback only'});
+        // Loopback callers use the per-run token; remote members' leaders
+        // use the Bearer token — the API layer decides per-origin.
+        if (onAgent == null) {
+          _json(req, 403, {'error': 'agent api disabled'});
           return;
         }
         await onAgent!(req);

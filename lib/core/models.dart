@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 
 String randomId([int bytes = 8]) {
@@ -42,6 +43,7 @@ class Peer {
     this.code,
     this.pinned = false,
     this.iconEmoji,
+    this.agentCapable = false,
     DateTime? lastSeen,
   }) : lastSeen = lastSeen ?? DateTime.now();
 
@@ -60,6 +62,9 @@ class Peer {
 
   /// User-chosen avatar emoji overriding the platform/brand icon.
   String? iconEmoji;
+
+  /// True when the peer exposes the remote agent API (allowLeaderControl).
+  bool agentCapable;
   DateTime lastSeen;
 
   bool get online => DateTime.now().difference(lastSeen).inMinutes < 5;
@@ -76,6 +81,7 @@ class Peer {
         'port': port,
         'pinned': pinned,
         if (iconEmoji != null) 'iconEmoji': iconEmoji,
+        'agentCapable': agentCapable,
         'lastSeen': lastSeen.toIso8601String(),
       };
 
@@ -88,11 +94,77 @@ class Peer {
         port: (j['port'] as num?)?.toInt() ?? 0,
         pinned: j['pinned'] as bool? ?? false,
         iconEmoji: j['iconEmoji'] as String?,
+        agentCapable: j['agentCapable'] as bool? ?? false,
         lastSeen: DateTime.tryParse(j['lastSeen'] as String? ?? ''),
       );
 }
 
 enum FileKind { image, video, doc, archive, audio, other }
+
+/// How much AI/agent automation this device permits.
+enum AiMode {
+  /// Mutating agent calls are refused outright.
+  off,
+
+  /// Every mutating agent call pops a local approval card (default).
+  ask,
+
+  /// Agents may act directly — but sends above
+  /// [AiPolicy.autoApproveBytes] still require approval, and remote
+  /// (leader-instructed) calls ALWAYS require approval regardless.
+  auto,
+}
+
+AiMode aiModeFromName(String? name) => switch (name) {
+      'off' => AiMode.off,
+      'auto' => AiMode.auto,
+      _ => AiMode.ask,
+    };
+
+/// AI/agent safety policy for this device.
+class AiPolicy {
+  AiPolicy({
+    this.mode = AiMode.ask,
+    this.autoApproveBytes = 32 * 1024 * 1024,
+    this.allowRemoteControl = false,
+    this.remoteToken = '',
+  });
+
+  AiMode mode;
+
+  /// In auto mode, sends at or below this size skip approval.
+  int autoApproveBytes;
+
+  /// Lets a leader device drive this member's agent API remotely
+  /// (Bearer token + per-call local approval still required).
+  bool allowRemoteControl;
+
+  /// Credential remote leaders must send as `Authorization: Bearer`.
+  String remoteToken;
+
+  Map<String, dynamic> toJson() => {
+        'mode': mode.name,
+        'autoApproveBytes': autoApproveBytes,
+        'allowRemoteControl': allowRemoteControl,
+        'remoteToken': remoteToken,
+      };
+
+  /// Public view — hides the remote token's value.
+  Map<String, dynamic> toPublicJson() => {
+        'mode': mode.name,
+        'autoApproveBytes': autoApproveBytes,
+        'allowRemoteControl': allowRemoteControl,
+        'remoteTokenSet': remoteToken.isNotEmpty,
+      };
+
+  factory AiPolicy.fromJson(Map<String, dynamic> j) => AiPolicy(
+        mode: aiModeFromName(j['mode'] as String?),
+        autoApproveBytes:
+            (j['autoApproveBytes'] as num?)?.toInt() ?? 32 * 1024 * 1024,
+        allowRemoteControl: j['allowRemoteControl'] as bool? ?? false,
+        remoteToken: (j['remoteToken'] as String?) ?? '',
+      );
+}
 
 FileKind fileKindFor(String name) {
   final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
@@ -306,6 +378,42 @@ class SendPlan {
         messageId: j['messageId'] as String?,
         error: j['error'] as String?,
       );
+}
+
+/// A pending AI/agent action awaiting the user's tap. Runtime only.
+class AgentAction {
+  AgentAction({
+    required this.id,
+    required this.kind,
+    required this.label,
+    required this.bytes,
+    required this.remote,
+    required this.decision,
+    DateTime? createdAt,
+  }) : createdAt = createdAt ?? DateTime.now();
+
+  final String id;
+
+  /// 'send' | 'plan' | 'answer' | 'stage' | 'cancel-plan' | 'remote-send'
+  final String kind;
+
+  /// Human summary shown on the approval card.
+  final String label;
+  final int bytes;
+
+  /// True when instructed by a remote leader device.
+  final bool remote;
+  final Completer<bool> decision;
+  final DateTime createdAt;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'kind': kind,
+        'label': label,
+        'bytes': bytes,
+        'remote': remote,
+        'createdAt': createdAt.toIso8601String(),
+      };
 }
 
 String fmtBytes(int b) {

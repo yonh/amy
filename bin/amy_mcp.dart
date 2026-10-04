@@ -9,6 +9,10 @@
 //   amy_list_plans / amy_cancel_plan {planId}
 //   amy_list_offers                   待确认的传入文件
 //   amy_answer_offer {messageId, accept}
+//   amy_policy {mode?, autoApproveMB?, allowRemoteControl?, rotate?}  AI 策略读/改
+//   amy_list_actions / amy_approve_action {actionId, allow}  AI 待审批
+//   amy_remote_send {member, peer, paths[], token?}  指挥成员设备发送
+//   amy_remote_files {member, token?}  列出成员设备文件
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -97,6 +101,66 @@ const _tools = [
         'accept': {'type': 'boolean'},
       },
       'required': ['messageId', 'accept'],
+    },
+  },
+  {
+    'name': 'amy_policy',
+    'description': '查看或修改本机 AI 策略：off 全禁 / ask 每个动作需确认 / auto 自动（超过 autoApproveMB 的发送仍需确认）；allowRemoteControl 允许主控设备远程指挥（需本机逐次确认）；rotate 轮换远程 token',
+    'inputSchema': {
+      'type': 'object',
+      'properties': {
+        'mode': {'type': 'string', 'enum': ['off', 'ask', 'auto']},
+        'autoApproveMB': {'type': 'number'},
+        'allowRemoteControl': {'type': 'boolean'},
+        'rotate': {'type': 'boolean', 'description': '轮换远程 token'},
+      },
+    },
+  },
+  {
+    'name': 'amy_list_actions',
+    'description': '列出等待用户批准的 AI/agent 操作',
+    'inputSchema': {'type': 'object', 'properties': {}},
+  },
+  {
+    'name': 'amy_approve_action',
+    'description': '批准或拒绝一个待审批的 AI/agent 操作',
+    'inputSchema': {
+      'type': 'object',
+      'properties': {
+        'actionId': {'type': 'string'},
+        'allow': {'type': 'boolean'},
+      },
+      'required': ['actionId', 'allow'],
+    },
+  },
+  {
+    'name': 'amy_remote_send',
+    'description': '指挥一台成员设备把它自己的文件发给另一台设备（成员需开启「允许主控指挥」，其用户仍须确认）',
+    'inputSchema': {
+      'type': 'object',
+      'properties': {
+        'member': {'type': 'string', 'description': '成员设备别名或指纹'},
+        'peer': {'type': 'string', 'description': '目标设备别名或指纹'},
+        'paths': {
+          'type': 'array',
+          'items': {'type': 'string'},
+          'description': '成员设备上的绝对路径',
+        },
+        'token': {'type': 'string', 'description': '成员的远程 token（首次提供后会被记住）'},
+      },
+      'required': ['member', 'peer', 'paths'],
+    },
+  },
+  {
+    'name': 'amy_remote_files',
+    'description': '列出一台成员设备接收目录里的文件（用于挑选要它发送的文件）',
+    'inputSchema': {
+      'type': 'object',
+      'properties': {
+        'member': {'type': 'string'},
+        'token': {'type': 'string'},
+      },
+      'required': ['member'],
     },
   },
 ];
@@ -205,6 +269,30 @@ Future<Object?> _callTool(
     case 'amy_answer_offer':
       return c.post(
           'answer?id=${a['messageId']}&accept=${a['accept'] == true}', {});
+    case 'amy_policy':
+      final patch = <String, dynamic>{};
+      for (final k in ['mode', 'autoApproveMB', 'allowRemoteControl', 'rotate']) {
+        if (a.containsKey(k)) patch[k] = a[k];
+      }
+      return patch.isEmpty ? c.get('policy') : c.post('policy', patch);
+    case 'amy_list_actions':
+      return c.get('actions');
+    case 'amy_approve_action':
+      return c.post(
+          'approve?id=${a['actionId']}&allow=${a['allow'] == true}', {});
+    case 'amy_remote_send':
+      return c.post('remote-send', {
+        'member': a['member'],
+        'peer': a['peer'],
+        'paths': a['paths'],
+        if (a['token'] != null) 'token': a['token'],
+      });
+    case 'amy_remote_files':
+      final t = a['token'] == null
+          ? ''
+          : '&token=${Uri.encodeComponent(a['token'] as String)}';
+      return c.get(
+          'remote-files?member=${Uri.encodeComponent(a['member'] as String)}$t');
     default:
       throw _RpcError(-32602, 'unknown tool: $name');
   }
