@@ -90,3 +90,15 @@ Future<void> saveAlias(String alias) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.setString('alias', alias);
 }
+
+/// First-run gate: false until the user finishes (or dismisses) the
+/// onboarding flow once.
+Future<bool> isOnboarded() async {
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.getBool('onboarded') ?? false;
+}
+
+Future<void> markOnboarded() async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setBool('onboarded', true);
+}
