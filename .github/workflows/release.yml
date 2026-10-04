@@ -1,0 +1,139 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [dev, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_NAME: amy
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            os: macos-latest
+          - platform: ios
+            os: macos-latest
+          - platform: apk
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: version
+        run: |
+          base=$(sed -n 's/^version: *\([0-9][0-9.]*\).*/\1/p' pubspec.yaml)
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            name="${GITHUB_REF_NAME#v}"
+            label="$GITHUB_REF_NAME"
+          else
+            name="$base"
+            label="${base}-build.${GITHUB_RUN_NUMBER}"
+          fi
+          {
+            echo "name=$name"
+            echo "number=$GITHUB_RUN_NUMBER"
+            echo "label=$label"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Build (macOS / Android)
+        if: matrix.platform != 'ios'
+        run: >
+          flutter build ${{ matrix.platform }} --release
+          --build-name=${{ steps.version.outputs.name }}
+          --build-number=${{ steps.version.outputs.number }}
+
+      - name: Build (iOS unsigned)
+        if: matrix.platform == 'ios'
+        run: >
+          flutter build ios --release --no-codesign
+          --build-name=${{ steps.version.outputs.name }}
+          --build-number=${{ steps.version.outputs.number }}
+
+      - name: Package (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          out="${APP_NAME}-${{ steps.version.outputs.label }}-macos"
+          app=$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -n1)
+          mkdir -p dist staging
+          cp -R "$app" staging/
+          ln -s /Applications staging/Applications
+          hdiutil create -volname "$APP_NAME" -srcfolder staging -ov -format UDZO "dist/$out.dmg"
+          ditto -c -k --keepParent "$app" "dist/$out.zip"
+
+      - name: Package (iOS unsigned IPA)
+        if: matrix.platform == 'ios'
+        run: |
+          out="${APP_NAME}-${{ steps.version.outputs.label }}-ios-unsigned"
+          app=$(find build/ios/iphoneos -maxdepth 1 -name '*.app' | head -n1)
+          mkdir -p dist Payload
+          cp -R "$app" Payload/
+          zip -qr "dist/$out.ipa" Payload
+          rm -rf Payload
+
+      - name: Package (Android APK)
+        if: matrix.platform == 'apk'
+        run: |
+          out="${APP_NAME}-${{ steps.version.outputs.label }}-android"
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk "dist/$out.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
