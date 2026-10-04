@@ -215,7 +215,9 @@ class AmyServer {
     }
 
     final dest = await onSavePath(session, file);
-    final tmp = File('$dest.amypart');
+    // Session+file-scoped temp name: a cancelled upload must never delete
+    // (or collide with) a later same-named transfer's in-flight temp file.
+    final tmp = File('$dest.${session.id}-$fileId.amypart');
     final sink = tmp.openWrite();
     var received = 0;
     var failed = false;
