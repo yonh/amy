@@ -106,6 +106,8 @@ class TransferEngine extends ChangeNotifier {
       onUploadDone: _uploadDone,
       onSessionEnd: _sessionEnd,
       onPeerInfo: _peerFromInfo,
+      onPeerGate: _peerGate,
+      onText: _handleText,
       onAgent: AgentApi(this).handle,
     );
     identity.port = await server.start();
@@ -186,12 +188,57 @@ class TransferEngine extends ChangeNotifier {
       peerId: peer.fingerprint,
       outgoing: true,
       files: picked,
-      status: MessageStatus.waitingApproval,
+      status: MessageStatus.sending,
     );
     _addMessage(msg);
     final send = _OutgoingSend(peer: peer, message: msg);
     _outgoing[msg.id] = send;
     unawaited(_runSend(send));
+    return msg;
+  }
+
+  /// Sends a chat text. No accept gate on the receiver — the POST itself
+  /// is the delivery: 200 means the peer stored the bubble, so the
+  /// message goes straight to done (double tick) once acked.
+  Future<TransferMessage> sendText(Peer peer, String text) async {
+    final trimmed = text.trim();
+    final msg = TransferMessage(
+      id: randomId(),
+      peerId: peer.fingerprint,
+      outgoing: true,
+      files: const [],
+      status: MessageStatus.sending,
+      text: trimmed,
+    );
+    _addMessage(msg);
+    unawaited(() async {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 6);
+      try {
+        final req = await client
+            .postUrl(peer.baseUri.replace(path: kTextPath))
+            .timeout(const Duration(seconds: 6));
+        req.headers.contentType = ContentType.json;
+        req.write(jsonEncode({
+          'from': identity.infoJson(),
+          'text': trimmed,
+        }));
+        final res = await req.close().timeout(const Duration(seconds: 10));
+        await res.drain<void>();
+        if (res.statusCode == 200) {
+          msg.status = MessageStatus.done;
+        } else {
+          msg.status = MessageStatus.failed;
+          msg.error = '对方返回 ${res.statusCode}';
+        }
+      } catch (e) {
+        msg.status = MessageStatus.failed;
+        msg.error = '$e';
+      } finally {
+        client.close(force: true);
+        _persist();
+      }
+    }());
     return msg;
   }
 
@@ -641,16 +688,30 @@ class TransferEngine extends ChangeNotifier {
           .postUrl(peer.baseUri.replace(path: kPreparePath))
           .timeout(const Duration(seconds: 6));
       req.headers.contentType = ContentType.json;
+      req.headers.add('x-amy-proto', '2');
       req.write(prepareBody);
+      // close() resolves when response headers arrive — the peer's
+      // server flushes them as soon as the offer is on its screen, so
+      // this is the true "delivered, awaiting answer" moment. Peers on
+      // older builds reply only after deciding, which just skips this
+      // intermediate state.
       final res = await req.close().timeout(kOfferClientTimeout);
-      final body = await utf8.decodeStream(res);
+      if (res.statusCode == 200 && msg.status == MessageStatus.sending) {
+        msg.status = MessageStatus.waitingApproval;
+        _persist();
+      }
+      // Same deadline for the body: it waits on the peer's decision
+      // and would otherwise hang forever if they vanish mid-offer.
+      final body = await utf8
+          .decodeStream(res)
+          .timeout(kOfferClientTimeout);
       if (send.cancelled) return;
-      if (res.statusCode != 200) {
+      final j = jsonDecode(body) as Map<String, dynamic>;
+      if (res.statusCode != 200 || j['accepted'] != true) {
         msg.status = MessageStatus.declined;
         _persist();
         return;
       }
-      final j = jsonDecode(body) as Map<String, dynamic>;
       send.sessionId = j['sessionId'] as String;
       final tokens = (j['files'] as Map).cast<String, String>();
       send.tokens = tokens;
@@ -739,6 +800,31 @@ class TransferEngine extends ChangeNotifier {
 
   Peer _peerFromInfo(Map<String, dynamic> info, InternetAddress remote) {
     return discovery.learnPeer(info, remote.address);
+  }
+
+  /// Anti-spoofing gate for endpoints that write state (prepare/text):
+  /// a fingerprint we already discovered ONLINE at a different address
+  /// can't legitimately arrive from another IP — a LAN client claiming
+  /// it is forging. Unknown or offline fingerprints pass: there is no
+  /// baseline to distrust, matching the existing trust model.
+  bool _peerGate(Map<String, dynamic> info, InternetAddress remote) {
+    final fp = info['fingerprint'] as String?;
+    if (fp == null) return true;
+    final known = discovery.peers[fp];
+    return known == null || !known.online || known.host == remote.address;
+  }
+
+  /// Chat text from a peer — lands straight in the thread, no accept
+  /// gate (the sender already consented by sending).
+  void _handleText(Peer from, String text) {
+    _addMessage(TransferMessage(
+      id: randomId(),
+      peerId: from.fingerprint,
+      outgoing: false,
+      files: const [],
+      status: MessageStatus.done,
+      text: text,
+    ));
   }
 
   /// Called by the server when a peer offers files. Creates the incoming

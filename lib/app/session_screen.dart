@@ -1,8 +1,12 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:pasteboard/pasteboard.dart';
+import 'package:video_player/video_player.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -32,8 +36,15 @@ class SessionScreen extends ConsumerStatefulWidget {
 
 class _SessionScreenState extends ConsumerState<SessionScreen> {
   final _draft = <TransferFile>[];
+  final _textCtrl = TextEditingController();
   bool _picking = false;
   bool _dropping = false;
+
+  @override
+  void dispose() {
+    _textCtrl.dispose();
+    super.dispose();
+  }
 
   Peer get _peer {
     // Follow live updates (online status, alias changes).
@@ -70,26 +81,78 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     }
   }
 
-  void _sendDraft() {
-    if (_draft.isEmpty) return;
-    ref
-        .read(engineProvider)
-        .sendFiles(_peer, List.of(_draft));
-    setState(_draft.clear);
+  void _send() {
+    final text = _textCtrl.text.trim();
+    if (_draft.isNotEmpty) {
+      ref
+          .read(engineProvider)
+          .sendFiles(_peer, List.of(_draft));
+      setState(_draft.clear);
+    }
+    if (text.isNotEmpty) {
+      ref.read(engineProvider).sendText(_peer, text);
+      setState(_textCtrl.clear);
+    }
+  }
+
+  /// Clipboard send: copied files (desktop) → draft; copied image →
+  /// materialized to a temp file → draft; plain text → sent as a text
+  /// message right away.
+  Future<void> _pasteClipboard() async {
+    try {
+      final files = await Pasteboard.files();
+      if (files.isNotEmpty) {
+        setState(() => _draft.addAll(files.map(fileFromPath)));
+        return;
+      }
+    } catch (_) {}
+    try {
+      final img = await Pasteboard.image;
+      if (img != null) {
+        final tmp = await getTemporaryDirectory();
+        final p =
+            '${tmp.path}/amy-clip-${DateTime.now().microsecondsSinceEpoch}.png';
+        await File(p).writeAsBytes(img, flush: true);
+        setState(() => _draft.add(fileFromPath(p)));
+        return;
+      }
+    } catch (_) {}
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final t = data?.text?.trim() ?? '';
+    if (t.isNotEmpty) {
+      await ref.read(engineProvider).sendText(_peer, t);
+      _toast('剪贴板文本已发送');
+    } else {
+      _toast('剪贴板是空的');
+    }
+  }
+
+  void _toast(String s) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(s)));
   }
 
   @override
   Widget build(BuildContext context) {
     ref.watch(engineProvider); // rebuild on any transfer update
     final peer = _peer;
-    final thread = ref.read(engineProvider).threadFor(peer.fingerprint);
+    final engine = ref.read(engineProvider);
+    final thread = engine.threadFor(peer.fingerprint);
+    // Pending scheduled sends for this peer render as plan bubbles inline
+    // — a scheduled message is still a message the user sent.
+    final pendingPlans = engine.plans
+        .where((p) =>
+            p.peerFingerprint == peer.fingerprint &&
+            p.status == PlanStatus.pending)
+        .toList();
 
     final body = Column(
       children: [
         _header(peer),
         const Divider(height: 1),
         Expanded(
-          child: thread.isEmpty
+          child: thread.isEmpty && pendingPlans.isEmpty
               ? Center(
                   child: Text(
                     '还没有传过文件\n用下面的回形针发第一条',
@@ -97,18 +160,38 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                     style: TextStyle(color: Colors.grey.shade500),
                   ),
                 )
-              : ListView.builder(
-                  padding: const EdgeInsets.all(16),
-                  itemCount: thread.length,
-                  itemBuilder: (ctx, i) => _Bubble(
-                    msg: thread[i],
-                    onAnswer: (accept) => ref
-                        .read(engineProvider)
-                        .answerOffer(thread[i].id, accept),
-                    onCancel: () =>
-                        ref.read(engineProvider).cancelMessage(thread[i]),
-                  ),
-                ),
+              : Builder(builder: (ctx) {
+                  final items = <Object>[...thread, ...pendingPlans]
+                    ..sort((a, b) => (a is TransferMessage
+                            ? a.createdAt
+                            : (a as SendPlan).createdAt)
+                        .compareTo(b is TransferMessage
+                            ? b.createdAt
+                            : (b as SendPlan).createdAt));
+                  return ListView.builder(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: items.length,
+                    itemBuilder: (ctx, i) {
+                      final it = items[i];
+                      if (it is SendPlan) {
+                        return _PlanBubble(
+                          plan: it,
+                          onCancel: () =>
+                              ref.read(engineProvider).cancelPlan(it.id),
+                        );
+                      }
+                      final msg = it as TransferMessage;
+                      return _Bubble(
+                        msg: msg,
+                        onAnswer: (accept) => ref
+                            .read(engineProvider)
+                            .answerOffer(msg.id, accept),
+                        onCancel: () =>
+                            ref.read(engineProvider).cancelMessage(msg),
+                      );
+                    },
+                  );
+                }),
         ),
         _composer(peer),
       ],
@@ -217,15 +300,32 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                 onPressed: online ? _pickFiles : null,
                 tooltip: '添加文件',
               ),
+              IconButton(
+                icon: const Icon(Icons.content_paste,
+                    size: 19, color: AmyTheme.accent),
+                onPressed: online ? _pasteClipboard : null,
+                tooltip: '发送剪贴板',
+              ),
               Expanded(
-                child: Text(
-                  !online
-                      ? '设备不在附近，恢复后可发送'
-                      : _draft.isEmpty
-                          ? '点回形针选择要发送的文件'
-                          : '待发 ${_draft.length} 个文件',
-                  style:
-                      const TextStyle(color: Colors.black38, fontSize: 13),
+                child: TextField(
+                  controller: _textCtrl,
+                  enabled: online,
+                  minLines: 1,
+                  maxLines: 4,
+                  textInputAction: TextInputAction.send,
+                  onChanged: (_) => setState(() {}),
+                  onSubmitted: (_) => _send(),
+                  decoration: InputDecoration(
+                    hintText: !online
+                        ? '设备不在附近，恢复后可发送'
+                        : _draft.isEmpty
+                            ? '输文字 · 📎 发文件 · 📋 发剪贴板'
+                            : '待发 ${_draft.length} 个文件…',
+                    isDense: true,
+                    hintStyle: const TextStyle(
+                        color: Colors.black38, fontSize: 13),
+                    border: InputBorder.none,
+                  ),
                 ),
               ),
               if (_draft.isNotEmpty)
@@ -247,8 +347,10 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   disabledBackgroundColor: Colors.black12,
                 ),
                 icon: const Icon(Icons.send, size: 18, color: Colors.white),
-                onPressed:
-                    _draft.isEmpty || !online ? null : _sendDraft,
+                onPressed: (_draft.isEmpty && _textCtrl.text.trim().isEmpty) ||
+                        !online
+                    ? null
+                    : _send,
               ),
             ],
           ),
@@ -292,6 +394,11 @@ class _Bubble extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (msg.text != null)
+              SelectableText(
+                msg.text!,
+                style: const TextStyle(fontSize: 14),
+              ),
             for (final f in msg.files) _fileRow(context, f, active),
             const SizedBox(height: 6),
             _footer(context),
@@ -302,42 +409,114 @@ class _Bubble extends StatelessWidget {
   }
 
   Widget _fileRow(BuildContext context, TransferFile f, bool active) {
-    final done = f.status == FileStatus.done && !msg.outgoing;
+    final local = f.path != null && File(f.path!).existsSync();
+    final isImage = f.kind == FileKind.image && local;
+    final openable = local && (msg.outgoing || f.status == FileStatus.done);
     return InkWell(
-      onTap: done ? () => _openFile(context, f) : null,
+      onTap: openable ? () => _previewFile(context, f) : null,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 3),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(iconForFileKind(f.kind), size: 18, color: AmyTheme.accent),
-            const SizedBox(width: 8),
-            Flexible(
-              child: Text(
-                '${f.name}  ·  ${fmtBytes(f.size)}',
-                style: const TextStyle(fontSize: 13),
-                overflow: TextOverflow.ellipsis,
+            // Images that are already on disk render a thumbnail inline —
+            // you can see what was sent without opening anything.
+            if (isImage)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: Image.file(
+                    File(f.path!),
+                    width: 220,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, _, _) => const SizedBox.shrink(),
+                  ),
+                ),
               ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(iconForFileKind(f.kind),
+                    size: 18, color: AmyTheme.accent),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    '${f.name}  ·  ${fmtBytes(f.size)}',
+                    style: const TextStyle(fontSize: 13),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (active && f.progress > 0 && f.progress < 1) ...[
+                  const SizedBox(width: 6),
+                  Text(
+                    '${(f.progress * 100).round()}%',
+                    style: const TextStyle(
+                        fontSize: 11, color: Colors.black45),
+                  ),
+                ],
+                if (openable) ...[
+                  const SizedBox(width: 6),
+                  Icon(
+                    isImage || f.kind == FileKind.video
+                        ? Icons.play_circle_outline
+                        : (Platform.isMacOS
+                            ? Icons.folder_open
+                            : Icons.ios_share),
+                    size: 14,
+                    color: AmyTheme.accent,
+                  ),
+                ],
+              ],
             ),
-            if (active && f.progress > 0 && f.progress < 1) ...[
-              const SizedBox(width: 6),
-              Text(
-                '${(f.progress * 100).round()}%',
-                style: const TextStyle(fontSize: 11, color: Colors.black45),
-              ),
-            ],
-            if (done) ...[
-              const SizedBox(width: 6),
-              Icon(
-                Platform.isMacOS ? Icons.folder_open : Icons.ios_share,
-                size: 14,
-                color: AmyTheme.accent,
-              ),
-            ],
           ],
         ),
       ),
     );
+  }
+
+  /// In-app preview for images and videos; everything else falls back to
+  /// the system opener / share sheet.
+  Future<void> _previewFile(
+      BuildContext context, TransferFile f) async {
+    final path = f.path;
+    if (path == null) return;
+    switch (f.kind) {
+      case FileKind.image:
+        await showDialog<void>(
+          context: context,
+          builder: (_) => Dialog(
+            backgroundColor: Colors.black,
+            insetPadding: const EdgeInsets.all(12),
+            child: Stack(
+              children: [
+                InteractiveViewer(
+                  child: Center(child: Image.file(File(path))),
+                ),
+                const Positioned(
+                  top: 8,
+                  right: 8,
+                  child: CloseButton(color: Colors.white),
+                ),
+              ],
+            ),
+          ),
+        );
+      case FileKind.video:
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => _VideoDialog(
+            path: path,
+            title: f.name,
+            onFallback: () {
+              Navigator.of(ctx).pop();
+              unawaited(_openFile(ctx, f));
+            },
+          ),
+        );
+      default:
+        await _openFile(context, f);
+    }
   }
 
   Future<void> _openFile(BuildContext context, TransferFile f) async {
@@ -345,8 +524,12 @@ class _Bubble extends StatelessWidget {
     if (path == null) return;
     if (Platform.isMacOS || Platform.isWindows || Platform.isLinux) {
       await Process.run(
-        Platform.isMacOS ? 'open' : 'xdg-open',
-        [path],
+        Platform.isMacOS
+            ? 'open'
+            : Platform.isWindows
+                ? 'cmd'
+                : 'xdg-open',
+        Platform.isWindows ? ['/c', 'start', '', path] : [path],
       );
     } else {
       await SharePlus.instance.share(ShareParams(files: [XFile(path)]));
@@ -374,17 +557,31 @@ class _Bubble extends StatelessWidget {
             ),
           ],
         ),
+      MessageStatus.sending => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.schedule, size: 13, color: Colors.black38),
+            const SizedBox(width: 4),
+            const Text('发送中…',
+                style: TextStyle(fontSize: 11, color: Colors.black45)),
+            if (msg.outgoing) ...[
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: onCancel,
+                child: const Text('取消',
+                    style:
+                        TextStyle(fontSize: 11, color: AmyTheme.accent)),
+              ),
+            ],
+          ],
+        ),
       MessageStatus.waitingApproval => Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const SizedBox(
-              width: 12,
-              height: 12,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-            const SizedBox(width: 8),
-            const Text('等待对方接受…',
-                style: TextStyle(fontSize: 11, color: Colors.black45)),
+            const Icon(Icons.check, size: 13, color: Colors.black38),
+            const SizedBox(width: 4),
+            Text(msg.text != null ? '发送中…' : '已送达 · 等待对方接受…',
+                style: const TextStyle(fontSize: 11, color: Colors.black45)),
             TextButton(
               onPressed: onCancel,
               child: const Text('取消', style: TextStyle(fontSize: 12)),
@@ -407,6 +604,10 @@ class _Bubble extends StatelessWidget {
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
+                if (msg.outgoing) ...[
+                  const Icon(Icons.check, size: 13, color: Colors.black38),
+                  const SizedBox(width: 4),
+                ],
                 Text('${(msg.progress * 100).round()}%',
                     style: const TextStyle(
                         fontSize: 11, color: Colors.black54)),
@@ -426,8 +627,12 @@ class _Bubble extends StatelessWidget {
       MessageStatus.done => Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.check, size: 13, color: Colors.black38),
-            const SizedBox(width: 4),
+            // Telegram-style receipt: outgoing shows a double tick once
+            // the peer confirmed receiving; incoming stays plain time.
+            if (msg.outgoing) ...[
+              const Icon(Icons.done_all, size: 13, color: AmyTheme.accent),
+              const SizedBox(width: 4),
+            ],
             Text(time,
                 style:
                     const TextStyle(fontSize: 11, color: Colors.black38)),
@@ -456,6 +661,194 @@ class _Bubble extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Outgoing-aligned bubble for a pending scheduled send — the "plan"
+/// state of the delivery receipt: single tick only once it dispatches
+/// into a real transfer message.
+class _PlanBubble extends StatelessWidget {
+  const _PlanBubble({required this.plan, required this.onCancel});
+
+  final SendPlan plan;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final when = plan.timed
+        ? '定于 ${plan.runAt!.month}/${plan.runAt!.day} '
+            '${plan.runAt!.hour.toString().padLeft(2, '0')}:'
+            '${plan.runAt!.minute.toString().padLeft(2, '0')}'
+        : '设备上线即发';
+    return Align(
+      alignment: Alignment.centerRight,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.all(12),
+        constraints: const BoxConstraints(maxWidth: 300),
+        decoration: BoxDecoration(
+          color: AmyTheme.bubbleMe.withValues(alpha: 0.6),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: AmyTheme.accent.withValues(alpha: 0.25)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (final name in plan.filePaths)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 3),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.insert_drive_file_outlined,
+                        size: 18, color: AmyTheme.accent),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        name.split(RegExp(r'[/\\]')).last,
+                        style: const TextStyle(fontSize: 13),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 6),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.schedule, size: 13,
+                    color: AmyTheme.accent),
+                const SizedBox(width: 4),
+                Flexible(
+                  child: Text('$when · 计划',
+                      style: const TextStyle(
+                          fontSize: 11, color: AmyTheme.accent)),
+                ),
+                TextButton(
+                  onPressed: onCancel,
+                  style: TextButton.styleFrom(
+                    minimumSize: Size.zero,
+                    padding: const EdgeInsets.only(left: 12),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: const Text('取消', style: TextStyle(fontSize: 12)),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// In-app video preview — plays the file inline instead of bouncing out
+/// to a system player.
+class _VideoDialog extends StatefulWidget {
+  const _VideoDialog({
+    required this.path,
+    required this.title,
+    required this.onFallback,
+  });
+
+  final String path;
+  final String title;
+
+  /// Called when in-app playback isn't available (e.g. Windows/Linux,
+  /// where no video_player implementation is registered) — opens the
+  /// file with the system player instead.
+  final VoidCallback onFallback;
+
+  @override
+  State<_VideoDialog> createState() => _VideoDialogState();
+}
+
+class _VideoDialogState extends State<_VideoDialog> {
+  late final VideoPlayerController _c =
+      VideoPlayerController.file(File(widget.path));
+  bool _ready = false;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _c.initialize().then((_) {
+      if (!mounted) return;
+      setState(() => _ready = true);
+      unawaited(_c.play());
+    }).catchError((_) {
+      if (mounted) setState(() => _failed = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    unawaited(_c.dispose());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.black,
+      insetPadding: const EdgeInsets.all(12),
+      child: Stack(
+        children: [
+          Center(
+            child: _failed
+                ? Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.videocam_off_outlined,
+                          color: Colors.white54, size: 40),
+                      const SizedBox(height: 12),
+                      const Text('当前平台不支持内置播放',
+                          style: TextStyle(color: Colors.white70)),
+                      TextButton(
+                        onPressed: widget.onFallback,
+                        child: const Text('用系统应用打开',
+                            style: TextStyle(color: AmyTheme.accent)),
+                      ),
+                    ],
+                  )
+                : !_ready
+                    ? const CircularProgressIndicator()
+                    : AspectRatio(
+                        aspectRatio: _c.value.aspectRatio,
+                        child: VideoPlayer(_c),
+                      ),
+          ),
+          Positioned(
+            top: 8,
+            right: 8,
+            child: CloseButton(color: Colors.white, onPressed: () {
+              unawaited(_c.pause());
+              Navigator.of(context).pop();
+            }),
+          ),
+          if (_ready)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 8,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  IconButton(
+                    icon: Icon(
+                      _c.value.isPlaying ? Icons.pause : Icons.play_arrow,
+                      color: Colors.white,
+                    ),
+                    onPressed: () => setState(() =>
+                        _c.value.isPlaying ? _c.pause() : _c.play()),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

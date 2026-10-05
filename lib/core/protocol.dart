@@ -7,6 +7,7 @@
 ///   POST /api/v1/upload?sessionId&fileId&token -> raw body bytes
 ///   POST /api/v1/cancel?sessionId&token -> abort an in-flight session
 ///   POST /api/v1/verify-code {code} -> 200 iff the posted pairing code is ours
+///   POST /api/v1/text {from,text}   -> chat text, stored immediately (200)
 library;
 
 const kProtocolVersion = 1;
@@ -29,6 +30,7 @@ const kPreparePath = '/api/v1/prepare-upload';
 const kUploadPath = '/api/v1/upload';
 const kCancelPath = '/api/v1/cancel';
 const kVerifyCodePath = '/api/v1/verify-code';
+const kTextPath = '/api/v1/text';
 
 /// 6-digit pairing code, rotated every [kCodeWindow]. Derived from the device
 /// fingerprint and shown only on the device's own screen — it is never
