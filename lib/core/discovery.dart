@@ -30,6 +30,7 @@ class DiscoveryService {
   BonsoirDiscovery? _discovery;
   Timer? _discoveryStopTimer;
   bool _scanning = false;
+  bool _deepQueued = false;
   bool _started = false;
   final _scanController = StreamController<bool>.broadcast();
 
@@ -246,13 +247,17 @@ class DiscoveryService {
   /// mDNS can drop out, and a device that could not bind kBasePort would
   /// otherwise never appear.
   Future<void> scanLocalSubnets({bool deep = false}) async {
+    // Remember an explicit deep request: if a shallower pass is already
+    // running we follow it with a deep one instead of dropping the ask.
+    _deepQueued = _deepQueued || deep;
     if (_scanning) return;
     _scanning = true;
     _scanController.add(true);
     try {
       await _revalidateKnown();
       final subnets = await _localSubnets();
-      deep = deep || ++_scanCycle % 4 == 0;
+      deep = _deepQueued || ++_scanCycle % 4 == 0;
+      _deepQueued = false;
       final jobs = <Future<void>>[];
       for (final prefix in subnets) {
         for (var i = 1; i < 255; i++) {
@@ -271,6 +276,10 @@ class DiscoveryService {
       // Repaint so peers whose lastSeen has aged show as offline even
       // though nothing new was (re)discovered this pass.
       _peersController.add(Map.of(_peers));
+      if (_deepQueued) {
+        _deepQueued = false;
+        unawaited(scanLocalSubnets(deep: true));
+      }
     }
   }
 
