@@ -109,6 +109,24 @@ Future<void> markOnboarded() async {
   await prefs.setBool('onboarded', true);
 }
 
+/// Reads a secure key with one retry on transient errors. Returns the
+/// stored value, or null when absent or the store failed twice.
+Future<String?> _readTwice(String key) async {
+  final r = await SecureStore.tryRead(key);
+  if (!r.failed) return r.value;
+  return (await SecureStore.tryRead(key)).value;
+}
+
+/// Writes a secure key and tracks the '<key>.broken' prefs flag: a
+/// failed write makes the prefs copy authoritative on the next load,
+/// so a stale secure value can't resurrect and overwrite newer state.
+Future<bool> _writeSecret(
+    SharedPreferences prefs, String key, String secret) async {
+  final wrote = await SecureStore.write(key, secret);
+  await prefs.setBool('$key.broken', !wrote);
+  return wrote;
+}
+
 /// AI/agent safety policy — persisted under 'ai.policy'. The remote
 /// token lives in secure storage (Keychain/Keystore); older builds kept
 /// it inside the prefs blob, so load migrates any plaintext copy.
@@ -123,13 +141,16 @@ Future<AiPolicy> loadAiPolicy() async {
   } catch (_) {
     p = AiPolicy();
   }
+  final key = SecureStore.remoteToken;
+  final broken = prefs.getBool('$key.broken') ?? false;
   final legacy = p.remoteToken;
-  final secured = (await SecureStore.read(SecureStore.remoteToken)) ?? '';
-  if (secured.isNotEmpty) {
-    p.remoteToken = secured;
+  final sec = broken ? null : await _readTwice(key);
+  if (sec != null && sec.isNotEmpty) {
+    p.remoteToken = sec;
     if (legacy.isNotEmpty) await saveAiPolicy(p); // scrub plaintext copy
   } else if (legacy.isNotEmpty &&
-      await SecureStore.write(SecureStore.remoteToken, legacy)) {
+      await SecureStore.write(key, legacy)) {
+    await prefs.setBool('$key.broken', false);
     await saveAiPolicy(p); // strip after the move succeeded
   }
   return p;
@@ -139,14 +160,12 @@ Future<void> saveAiPolicy(AiPolicy p) async {
   final prefs = await SharedPreferences.getInstance();
   final j = p.toJson();
   final token = (j.remove('remoteToken') as String?) ?? '';
-  final secured = token.isNotEmpty &&
-      await SecureStore.write(SecureStore.remoteToken, token);
-  if (token.isEmpty) {
-    await SecureStore.write(SecureStore.remoteToken, '');
+  // token=='' deletes the entry; when the write fails the broken flag
+  // makes this prefs copy authoritative instead of a stale secure one.
+  if (!await _writeSecret(prefs, SecureStore.remoteToken, token) ||
+      token.isEmpty) {
+    j['remoteToken'] = token;
   }
-  // Secure storage unavailable → keep the token in prefs rather than
-  // lose it (same exposure as before this change).
-  if (!secured) j['remoteToken'] = token;
   await prefs.setString('ai.policy', jsonEncode(j));
 }
 
@@ -155,41 +174,43 @@ Future<void> saveAiPolicy(AiPolicy p) async {
 /// copy written by older builds is migrated on first load.
 Future<Map<String, String>> loadRemoteTokens() async {
   final prefs = await SharedPreferences.getInstance();
-  final secured = await SecureStore.read(SecureStore.remoteTokens);
-  if (secured != null && secured.isNotEmpty) {
+  final key = SecureStore.remoteTokens;
+  final broken = prefs.getBool('$key.broken') ?? false;
+  final sec = broken ? null : await _readTwice(key);
+  if (sec != null && sec.isNotEmpty) {
     try {
-      final m = (jsonDecode(secured) as Map).cast<String, String>();
+      final m = (jsonDecode(sec) as Map).cast<String, String>();
       if (prefs.getString('ai.remoteTokens') != null) {
         await prefs.remove('ai.remoteTokens'); // scrub plaintext copy
       }
       return m;
     } catch (_) {}
   }
+  Map<String, String> m;
   try {
-    final m =
-        (jsonDecode(prefs.getString('ai.remoteTokens') ?? '{}') as Map)
-            .cast<String, String>();
-    if (m.isNotEmpty &&
-        await SecureStore.write(
-            SecureStore.remoteTokens, jsonEncode(m))) {
-      await prefs.remove('ai.remoteTokens');
-    }
-    return m;
+    m = (jsonDecode(prefs.getString('ai.remoteTokens') ?? '{}') as Map)
+        .cast<String, String>();
   } catch (_) {
-    return {};
+    m = {};
   }
+  if (m.isNotEmpty &&
+      await SecureStore.write(key, jsonEncode(m))) {
+    await prefs.setBool('$key.broken', false);
+    await prefs.remove('ai.remoteTokens');
+  }
+  return m;
 }
 
 Future<void> saveRemoteTokens(Map<String, String> tokens) async {
   final prefs = await SharedPreferences.getInstance();
   final j = jsonEncode(tokens);
-  if (tokens.isNotEmpty &&
-      await SecureStore.write(SecureStore.remoteTokens, j)) {
+  // Empty map deletes the entry; a failed write keeps the prefs copy
+  // authoritative (broken flag) instead of losing the update.
+  if (await _writeSecret(
+          prefs, SecureStore.remoteTokens, tokens.isEmpty ? '' : j) &&
+      tokens.isNotEmpty) {
     await prefs.remove('ai.remoteTokens');
   } else {
-    if (tokens.isEmpty) {
-      await SecureStore.write(SecureStore.remoteTokens, '');
-    }
     await prefs.setString('ai.remoteTokens', j);
   }
 }
@@ -208,13 +229,16 @@ Future<LlmConfig> loadLlmConfig() async {
   } catch (_) {
     c = LlmConfig();
   }
+  final key = SecureStore.llmApiKey;
+  final broken = prefs.getBool('$key.broken') ?? false;
   final legacy = c.apiKey;
-  final secured = (await SecureStore.read(SecureStore.llmApiKey)) ?? '';
-  if (secured.isNotEmpty) {
-    c.apiKey = secured;
+  final sec = broken ? null : await _readTwice(key);
+  if (sec != null && sec.isNotEmpty) {
+    c.apiKey = sec;
     if (legacy.isNotEmpty) await saveLlmConfig(c); // scrub plaintext copy
   } else if (legacy.isNotEmpty &&
-      await SecureStore.write(SecureStore.llmApiKey, legacy)) {
+      await SecureStore.write(key, legacy)) {
+    await prefs.setBool('$key.broken', false);
     await saveLlmConfig(c); // strip after the move succeeded
   }
   return c;
@@ -224,12 +248,10 @@ Future<void> saveLlmConfig(LlmConfig c) async {
   final prefs = await SharedPreferences.getInstance();
   final j = c.toJson();
   final key = (j.remove('apiKey') as String?) ?? '';
-  final secured = key.isNotEmpty &&
-      await SecureStore.write(SecureStore.llmApiKey, key);
-  if (key.isEmpty) {
-    await SecureStore.write(SecureStore.llmApiKey, '');
+  if (!await _writeSecret(prefs, SecureStore.llmApiKey, key) ||
+      key.isEmpty) {
+    j['apiKey'] = key;
   }
-  if (!secured) j['apiKey'] = key; // fallback: keep as before
   await prefs.setString('ai.llmConfig', jsonEncode(j));
 }
 
