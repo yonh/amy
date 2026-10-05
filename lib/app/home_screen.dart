@@ -42,6 +42,8 @@ class HomeScreen extends ConsumerStatefulWidget {
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   Peer? _selected;
+  bool _aiOpen = false;
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
 
   /// Files staged for one-tap sends: while non-empty, tapping a device
   /// sends immediately instead of opening the session (AirDrop-style).
@@ -51,11 +53,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final wide = MediaQuery.of(context).size.width >= 720;
+    // 320 (device list) + 340 (AI panel) + a workable session needs ~1080.
+    final threePane = MediaQuery.of(context).size.width >= 1080;
     final nearby = ref.watch(nearbyProvider);
     final threaded = ref.watch(threadedPeersProvider);
     final scanning = nearby.isEmpty;
 
     return Scaffold(
+      key: _scaffoldKey,
+      // On phones the AI panel lives in the end drawer; on wide layouts
+      // it is an inline sidebar, so the drawer only exists for narrow ones.
+      endDrawer: wide
+          ? null
+          : const Drawer(
+              width: 320,
+              child: SafeArea(
+                child: AiPanel(),
+              ),
+            ),
       body: SafeArea(
         child: wide
             ? Row(
@@ -65,15 +80,31 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     child: _deviceList(nearby, threaded, scanning),
                   ),
                   const VerticalDivider(width: 1),
+                  // Three fixed panes only fit once there's real room —
+                  // at ~720px a 340px sidebar would leave the session
+                  // unusable, so the AI panel replaces the detail pane.
                   Expanded(
-                    child: _selected == null
-                        ? const _EmptyDetail()
-                        : SessionScreen(
-                            key: ValueKey(_selected!.fingerprint),
-                            peer: _selected!,
-                            embedded: true,
-                          ),
+                    child: _aiOpen && !threePane
+                        ? AiPanel(
+                            onClose: () => setState(() => _aiOpen = false),
+                          )
+                        : _selected == null
+                            ? const _EmptyDetail()
+                            : SessionScreen(
+                                key: ValueKey(_selected!.fingerprint),
+                                peer: _selected!,
+                                embedded: true,
+                              ),
                   ),
+                  if (_aiOpen && threePane) ...[
+                    const VerticalDivider(width: 1),
+                    SizedBox(
+                      width: 340,
+                      child: AiPanel(
+                        onClose: () => setState(() => _aiOpen = false),
+                      ),
+                    ),
+                  ],
                 ],
               )
             : _deviceList(nearby, threaded, scanning),
@@ -95,6 +126,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   Widget _deviceList(List<Peer> nearby, List<Peer> threaded, bool scanning) {
+    final wide = MediaQuery.of(context).size.width >= 720;
     return Column(
       children: [
         Padding(
@@ -111,7 +143,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 icon: const Icon(Icons.smart_toy_outlined,
                     color: AmyTheme.accent),
                 tooltip: 'AI 助手',
-                onPressed: () => showAiSheet(context),
+                onPressed: () {
+                  if (wide) {
+                    setState(() => _aiOpen = !_aiOpen);
+                  } else {
+                    _scaffoldKey.currentState?.openEndDrawer();
+                  }
+                },
               ),
               IconButton(
                 icon: const Icon(Icons.schedule_send,
