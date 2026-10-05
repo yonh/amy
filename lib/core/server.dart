@@ -167,8 +167,25 @@ class AmyServer {
     }
   }
 
+  /// Offer bodies carry only a file manifest — a generous cap blocks the
+  /// same unbounded-body abuse as /text without limiting file counts.
+  static const _kMaxPrepareBytes = 256 * 1024;
+
   Future<void> _prepare(HttpRequest req) async {
-    final body = await utf8.decodeStream(req);
+    final bb = BytesBuilder();
+    var oversized = false;
+    await for (final chunk in req) {
+      bb.add(chunk);
+      if (bb.length > _kMaxPrepareBytes) {
+        oversized = true;
+        break;
+      }
+    }
+    if (oversized) {
+      _json(req, 413, {'error': 'offer too large'});
+      return;
+    }
+    final body = utf8.decode(bb.takeBytes());
     final j = jsonDecode(body) as Map<String, dynamic>;
     final fromInfo = j['from'] as Map<String, dynamic>? ?? {};
     final remote = req.connectionInfo?.remoteAddress;
