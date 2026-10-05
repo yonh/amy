@@ -187,7 +187,7 @@ class TransferEngine extends ChangeNotifier {
       peerId: peer.fingerprint,
       outgoing: true,
       files: picked,
-      status: MessageStatus.waitingApproval,
+      status: MessageStatus.sending,
     );
     _addMessage(msg);
     final send = _OutgoingSend(peer: peer, message: msg);
@@ -206,7 +206,7 @@ class TransferEngine extends ChangeNotifier {
       peerId: peer.fingerprint,
       outgoing: true,
       files: const [],
-      status: MessageStatus.waitingApproval,
+      status: MessageStatus.sending,
       text: trimmed,
     );
     _addMessage(msg);
@@ -688,15 +688,24 @@ class TransferEngine extends ChangeNotifier {
           .timeout(const Duration(seconds: 6));
       req.headers.contentType = ContentType.json;
       req.write(prepareBody);
+      // close() resolves when response headers arrive — the peer's
+      // server flushes them as soon as the offer is on its screen, so
+      // this is the true "delivered, awaiting answer" moment. Peers on
+      // older builds reply only after deciding, which just skips this
+      // intermediate state.
       final res = await req.close().timeout(kOfferClientTimeout);
+      if (res.statusCode == 200 && msg.status == MessageStatus.sending) {
+        msg.status = MessageStatus.waitingApproval;
+        _persist();
+      }
       final body = await utf8.decodeStream(res);
       if (send.cancelled) return;
-      if (res.statusCode != 200) {
+      final j = jsonDecode(body) as Map<String, dynamic>;
+      if (res.statusCode != 200 || j['accepted'] != true) {
         msg.status = MessageStatus.declined;
         _persist();
         return;
       }
-      final j = jsonDecode(body) as Map<String, dynamic>;
       send.sessionId = j['sessionId'] as String;
       final tokens = (j['files'] as Map).cast<String, String>();
       send.tokens = tokens;

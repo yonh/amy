@@ -446,10 +446,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     if (thread.isEmpty) return '同一局域网 · 点按开始会话';
     final m = thread.last;
     final who = m.outgoing ? '你' : '对方';
-    final what =
-        m.files.length == 1 ? m.files.first.name : '${m.files.length} 个文件';
+    final what = m.text != null
+        ? (m.text!.length > 24 ? '${m.text!.substring(0, 24)}…' : m.text!)
+        : m.files.length == 1
+            ? m.files.first.name
+            : '${m.files.length} 个文件';
     return switch (m.status) {
       MessageStatus.offered => '$who想发送 $what',
+      MessageStatus.sending => '发送中…',
       MessageStatus.waitingApproval => '等待对方接受…',
       MessageStatus.active => '传输中 ${(m.progress * 100).round()}%',
       MessageStatus.done => '$who发送了 $what',

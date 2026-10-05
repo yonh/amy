@@ -546,6 +546,15 @@ class _Bubble extends StatelessWidget {
             ),
           ],
         ),
+      MessageStatus.sending => const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.schedule, size: 13, color: Colors.black38),
+            SizedBox(width: 4),
+            Text('发送中…',
+                style: TextStyle(fontSize: 11, color: Colors.black45)),
+          ],
+        ),
       MessageStatus.waitingApproval => Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -677,7 +686,7 @@ class _PlanBubble extends StatelessWidget {
                     const SizedBox(width: 8),
                     Flexible(
                       child: Text(
-                        name.split('/').last,
+                        name.split(RegExp(r'[/\\]')).last,
                         style: const TextStyle(fontSize: 13),
                         overflow: TextOverflow.ellipsis,
                       ),

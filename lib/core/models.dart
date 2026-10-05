@@ -276,7 +276,11 @@ enum MessageStatus {
   /// Incoming offer the local user has not answered yet.
   offered,
 
-  /// Outgoing offer sent, waiting for the peer to accept or decline.
+  /// Outgoing request still in flight — not yet known to be delivered.
+  sending,
+
+  /// Outgoing offer delivered (peer's screen shows it), waiting for the
+  /// peer to accept or decline.
   waitingApproval,
 
   /// Accepted, bytes are flowing.

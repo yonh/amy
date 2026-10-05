@@ -177,21 +177,37 @@ class AmyServer {
     final session = await onPrepare(peer, files);
     sessions[session.id] = session;
 
+    // Flush headers now: once they leave, the sender knows the offer
+    // reached this device (single tick) while we still block on the
+    // receiver's decision. Status stays 200 for both outcomes — the
+    // body's `accepted` flag carries the verdict. Older peers reply
+    // only after deciding; new senders just skip the waiting phase.
+    req.response
+      ..statusCode = 200
+      ..headers.contentType = ContentType.json;
+    await req.response.flush();
+
     // Block until the user decides, or auto-decline on timeout.
     final accepted = await session.decision.future
         .timeout(kOfferTimeout, onTimeout: () => false);
     if (!accepted || session.cancelled) {
       sessions.remove(session.id);
       onSessionEnd(session, 'declined');
-      _json(req, 403, {'accepted': false});
+      _body(req, {'accepted': false});
       return;
     }
     session.accepted = true;
-    _json(req, 200, {
+    _body(req, {
       'accepted': true,
       'sessionId': session.id,
       'files': session.tokens,
     });
+  }
+
+  /// Writes a JSON body when headers were already flushed (see _prepare).
+  void _body(HttpRequest req, Map<String, dynamic> body) {
+    req.response.write(jsonEncode(body));
+    unawaited(req.response.close());
   }
 
   Future<void> _text(HttpRequest req) async {
