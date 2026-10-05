@@ -202,5 +202,19 @@ void main() {
       expect(r.remoteToken, 'tok-123');
       expect(r.mode, AiMode.auto);
     });
+
+    test('corrupt remoteTokens prefs degrades to empty, never throws',
+        () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      // Non-string map values — a lazy cast would survive decode then
+      // throw at migration-encode time, outside the guard.
+      SharedPreferences.setMockInitialValues(
+          {'flutter.ai.remoteTokens': '{"fp1":42,"fp2":"tok"}'});
+      expect(await loadRemoteTokens(), isEmpty);
+      // Non-map payload as well.
+      SharedPreferences.setMockInitialValues(
+          {'flutter.ai.remoteTokens': '12345'});
+      expect(await loadRemoteTokens(), isEmpty);
+    });
   });
 }

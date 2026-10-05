@@ -109,12 +109,13 @@ Future<void> markOnboarded() async {
   await prefs.setBool('onboarded', true);
 }
 
-/// Reads a secure key with one retry on transient errors. Returns the
-/// stored value, or null when absent or the store failed twice.
-Future<String?> _readTwice(String key) async {
+/// Reads a secure key with one retry on transient errors. Keeps the
+/// error/absent distinction: callers must never write into a store
+/// whose state they couldn't verify — that could clobber a newer
+/// credential the failed reads couldn't see.
+Future<SecureRead> _readSecret(String key) async {
   final r = await SecureStore.tryRead(key);
-  if (!r.failed) return r.value;
-  return (await SecureStore.tryRead(key)).value;
+  return r.failed ? SecureStore.tryRead(key) : r;
 }
 
 /// Writes a secure key and tracks the '<key>.broken' prefs flag: a
@@ -144,11 +145,15 @@ Future<AiPolicy> loadAiPolicy() async {
   final key = SecureStore.remoteToken;
   final broken = prefs.getBool('$key.broken') ?? false;
   final legacy = p.remoteToken;
-  final sec = broken ? null : await _readTwice(key);
+  final r = broken
+      ? const SecureRead(null, failed: true)
+      : await _readSecret(key);
+  final sec = r.failed ? null : r.value;
   if (sec != null && sec.isNotEmpty) {
     p.remoteToken = sec;
     if (legacy.isNotEmpty) await saveAiPolicy(p); // scrub plaintext copy
   } else if (legacy.isNotEmpty &&
+      !r.failed && // unverifiable store → degrade, don't write back
       await SecureStore.write(key, legacy)) {
     await prefs.setBool('$key.broken', false);
     await saveAiPolicy(p); // strip after the move succeeded
@@ -176,10 +181,14 @@ Future<Map<String, String>> loadRemoteTokens() async {
   final prefs = await SharedPreferences.getInstance();
   final key = SecureStore.remoteTokens;
   final broken = prefs.getBool('$key.broken') ?? false;
-  final sec = broken ? null : await _readTwice(key);
+  final r = broken
+      ? const SecureRead(null, failed: true)
+      : await _readSecret(key);
+  final sec = r.failed ? null : r.value;
   if (sec != null && sec.isNotEmpty) {
     try {
-      final m = (jsonDecode(sec) as Map).cast<String, String>();
+      final m =
+          Map<String, String>.from(jsonDecode(sec) as Map);
       if (prefs.getString('ai.remoteTokens') != null) {
         await prefs.remove('ai.remoteTokens'); // scrub plaintext copy
       }
@@ -188,12 +197,15 @@ Future<Map<String, String>> loadRemoteTokens() async {
   }
   Map<String, String> m;
   try {
-    m = (jsonDecode(prefs.getString('ai.remoteTokens') ?? '{}') as Map)
-        .cast<String, String>();
+    // Eager from() — a lazy cast<>() would throw later at encode time,
+    // outside this try, and take down engine init.
+    m = Map<String, String>.from(
+        jsonDecode(prefs.getString('ai.remoteTokens') ?? '{}') as Map);
   } catch (_) {
     m = {};
   }
   if (m.isNotEmpty &&
+      !r.failed && // unverifiable store → degrade, don't write back
       await SecureStore.write(key, jsonEncode(m))) {
     await prefs.setBool('$key.broken', false);
     await prefs.remove('ai.remoteTokens');
@@ -232,11 +244,15 @@ Future<LlmConfig> loadLlmConfig() async {
   final key = SecureStore.llmApiKey;
   final broken = prefs.getBool('$key.broken') ?? false;
   final legacy = c.apiKey;
-  final sec = broken ? null : await _readTwice(key);
+  final r = broken
+      ? const SecureRead(null, failed: true)
+      : await _readSecret(key);
+  final sec = r.failed ? null : r.value;
   if (sec != null && sec.isNotEmpty) {
     c.apiKey = sec;
     if (legacy.isNotEmpty) await saveLlmConfig(c); // scrub plaintext copy
   } else if (legacy.isNotEmpty &&
+      !r.failed && // unverifiable store → degrade, don't write back
       await SecureStore.write(key, legacy)) {
     await prefs.setBool('$key.broken', false);
     await saveLlmConfig(c); // strip after the move succeeded
