@@ -272,15 +272,17 @@ class TransferEngine extends ChangeNotifier {
     try {
       if (p.agentCreated) {
         final denied = <String>[];
-        final staging = (await files.stagingDir()).path;
+        final staging = canonPath((await files.stagingDir()).path) ?? '';
         for (final x in p.filePaths) {
-          // Staged paths re-check their recorded origin claim; a staged
-          // file with none is unverifiable and counts as outside.
-          final claimed = stagedSources[x];
-          final effective =
-              x.startsWith('$staging${Platform.pathSeparator}')
-                  ? claimed
-                  : x;
+          // Canonicalize first so disguised paths can't dodge the
+          // staged check; staged files re-check their recorded origin
+          // claim — none means unverifiable and counts as outside.
+          final cp = canonPath(x);
+          final isStaged = cp != null &&
+              staging.isNotEmpty &&
+              cp.startsWith('$staging${Platform.pathSeparator}');
+          final claimed = cp == null ? null : stagedSources[cp];
+          final effective = isStaged ? claimed : cp;
           if (effective == null || !await pathInScope(effective)) {
             denied.add(x.split(Platform.pathSeparator).last);
           }
@@ -420,6 +422,10 @@ class TransferEngine extends ChangeNotifier {
     final c = _canon(path);
     return c != null && pathWithinRoots(c, await allowedRoots());
   }
+
+  /// Public wrapper for the canonicalizer — the agent API needs it to
+  /// detect staged paths before trusting recorded origin claims.
+  String? canonPath(String path) => _canon(path);
 
   /// Normalized absolute path with symlinks resolved, or null when
   /// resolution fails (broken link / permission) — treat as unverifiable.

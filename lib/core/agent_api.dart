@@ -197,17 +197,22 @@ class AgentApi {
   Future<List<String>?> _checkScope(
       HttpRequest req, List<TransferFile> fs) async {
     final denied = <String>[];
-    final staging = (await files.stagingDir()).path;
+    final staging =
+        engine.canonPath((await files.stagingDir()).path) ?? '';
     for (final f in fs) {
-      final p = f.path ?? '';
-      final isStaged =
-          p.startsWith('$staging${Platform.pathSeparator}');
-      // Staged bytes are opaque: check the caller-claimed origin recorded
-      // at stage time, not the (always-allowed) staging path. No claim —
-      // e.g. bytes a process wrote into the staging dir itself — means
+      // Canonicalize BEFORE the staged check: a disguised path (`..`,
+      // symlink) that resolves into staging would otherwise skip the
+      // origin check and pass as an always-allowed staging file.
+      final cp = engine.canonPath(f.path ?? '');
+      final isStaged = cp != null &&
+          staging.isNotEmpty &&
+          cp.startsWith('$staging${Platform.pathSeparator}');
+      // Staged bytes are opaque: only a content-verified origin claim
+      // recorded at stage time stands in for the real path. No claim —
+      // planted bytes, unreadable sources, post-restart files — means
       // the origin is unverifiable and counts as outside.
-      final claimed = engine.stagedSources[p];
-      final effective = isStaged ? claimed : p;
+      final claimed = cp == null ? null : engine.stagedSources[cp];
+      final effective = isStaged ? claimed : cp;
       if (effective == null ||
           !await engine.pathInScope(effective)) {
         denied.add(f.name);
@@ -271,34 +276,86 @@ class AgentApi {
       });
       return;
     }
+    // Bound staged uploads — a runaway or hostile loopback client must
+    // not fill the app container's disk.
+    const cap = 8 << 30; // 8 GiB
+    if (req.contentLength > cap) {
+      _json(req, 413, {'error': 'staged upload exceeds ${cap >> 30} GiB'});
+      return;
+    }
     final dir = await files.stagingDir();
     final dest = '${dir.path}/${randomId(4)}-$name';
     final sink = File(dest).openWrite();
     var size = 0;
+    var oversized = false;
     try {
       await for (final chunk in req) {
-        sink.add(chunk);
         size += chunk.length;
+        if (size > cap) {
+          oversized = true;
+          break;
+        }
+        sink.add(chunk);
       }
       await sink.flush();
     } finally {
       await sink.close();
     }
+    if (oversized) {
+      await File(dest).delete();
+      _json(req, 413, {'error': 'staged upload exceeds ${cap >> 30} GiB'});
+      return;
+    }
     // The stager declares where the bytes came from (`source`); the scope
     // gate checks that claim instead of the always-allowed staging path.
-    // When the app can read the claimed source itself, a size mismatch
-    // exposes a dishonest claim right here.
+    // A claim only counts when the app can PROVE it — byte-identical
+    // content against the claimed source. An unreadable source is
+    // unverifiable, so no claim is recorded and the file counts as
+    // outside the whitelist; a readable-but-different source is a lie
+    // (or raced write) and the upload is rejected.
     final source = req.uri.queryParameters['source'];
     if (source != null && source.isNotEmpty) {
       final sf = File(source);
-      if (await sf.exists() && await sf.length() != size) {
-        await File(dest).delete();
-        _json(req, 400, {'error': 'claimed source size mismatch'});
-        return;
+      if (await sf.exists()) {
+        if (await _sameBytes(sf, File(dest))) {
+          engine.stagedSources[
+              engine.canonPath(dest) ?? dest] = source;
+        } else {
+          await File(dest).delete();
+          _json(req, 400, {
+            'error': 'staged bytes differ from claimed source',
+          });
+          return;
+        }
       }
-      engine.stagedSources[dest] = source;
     }
     _json(req, 200, {'path': dest, 'size': size});
+  }
+
+  /// Byte-identical comparison of two files (chunked, no hashing).
+  Future<bool> _sameBytes(File a, File b) async {
+    if (await a.length() != await b.length()) return false;
+    final fa = await a.open();
+    final fb = await b.open();
+    try {
+      const chunk = 1 << 20;
+      var off = 0;
+      final len = await fa.length();
+      while (off < len) {
+        final n = len - off < chunk ? len - off : chunk;
+        final ba = await fa.read(n);
+        final bb = await fb.read(n);
+        if (ba.length != bb.length) return false;
+        for (var i = 0; i < ba.length; i++) {
+          if (ba[i] != bb[i]) return false;
+        }
+        off += n;
+      }
+      return true;
+    } finally {
+      await fa.close();
+      await fb.close();
+    }
   }
 
   /// Recent files in the downloads dir — lets a leader pick what to pull
