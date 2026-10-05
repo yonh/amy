@@ -118,7 +118,7 @@ Future<SecureRead> _readSecret(String key) async {
   return r.failed ? SecureStore.tryRead(key) : r;
 }
 
-/// Writes a secure key and tracks the '<key>.broken' prefs flag: a
+/// Writes a secure key and tracks the `<key>.broken` prefs flag: a
 /// failed write makes the prefs copy authoritative on the next load,
 /// so a stale secure value can't resurrect and overwrite newer state.
 Future<bool> _writeSecret(
