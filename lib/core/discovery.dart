@@ -81,7 +81,9 @@ class DiscoveryService {
       } catch (_) {}
     }
     _armDiscoveryStop(const Duration(seconds: 15));
-    unawaited(scanLocalSubnets());
+    // Manual scans always deep-probe alternate ports — the user asked
+    // once, so one pass should find everyone it can.
+    unawaited(scanLocalSubnets(deep: true));
   }
 
   void _armDiscoveryStop(Duration delay) {
@@ -243,14 +245,14 @@ class DiscoveryService {
   /// probes the first few alternate ports on hosts that miss the base port —
   /// mDNS can drop out, and a device that could not bind kBasePort would
   /// otherwise never appear.
-  Future<void> scanLocalSubnets() async {
+  Future<void> scanLocalSubnets({bool deep = false}) async {
     if (_scanning) return;
     _scanning = true;
     _scanController.add(true);
     try {
       await _revalidateKnown();
       final subnets = await _localSubnets();
-      final deep = ++_scanCycle % 4 == 0;
+      deep = deep || ++_scanCycle % 4 == 0;
       final jobs = <Future<void>>[];
       for (final prefix in subnets) {
         for (var i = 1; i < 255; i++) {
@@ -266,6 +268,9 @@ class DiscoveryService {
     } finally {
       _scanning = false;
       _scanController.add(false);
+      // Repaint so peers whose lastSeen has aged show as offline even
+      // though nothing new was (re)discovered this pass.
+      _peersController.add(Map.of(_peers));
     }
   }
 
