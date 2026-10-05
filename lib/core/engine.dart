@@ -250,7 +250,17 @@ class TransferEngine extends ChangeNotifier {
       if (p.status != PlanStatus.pending) continue;
       if (p.runAt != null && now.isBefore(p.runAt!)) continue;
       final peer = peers[p.peerFingerprint];
-      if (peer == null || !peer.online) continue;
+      if (peer == null || !peer.online) {
+        // A due plan is waiting on a peer we can't see. Discovery no
+        // longer scans continuously, so kick a throttled wake-up scan —
+        // otherwise 'send when online' plans would stall forever.
+        if (_lastWakeScan == null ||
+            now.difference(_lastWakeScan!) > const Duration(seconds: 60)) {
+          _lastWakeScan = now;
+          unawaited(discovery.scanNow());
+        }
+        continue;
+      }
       final missing =
           p.filePaths.where((x) => !File(x).existsSync()).toList();
       if (missing.isNotEmpty) {
@@ -272,6 +282,10 @@ class TransferEngine extends ChangeNotifier {
   /// Plans mid-dispatch (async scope re-check + send kickoff) so the tick
   /// loop doesn't start them twice.
   final _dispatchingPlans = <String>{};
+
+  /// Last time _tickPlans triggered a discovery scan while waiting for a
+  /// plan's peer to come online (throttled to once a minute).
+  DateTime? _lastWakeScan;
 
   /// Dispatches a due plan. Agent-created plans are re-validated against
   /// the CURRENT security scope here — the whitelist may have tightened

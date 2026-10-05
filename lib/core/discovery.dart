@@ -28,9 +28,16 @@ class DiscoveryService {
 
   BonsoirBroadcast? _broadcast;
   BonsoirDiscovery? _discovery;
-  Timer? _scanTimer;
+  Timer? _discoveryStopTimer;
   bool _scanning = false;
+  bool _deepQueued = false;
   bool _started = false;
+  final _scanController = StreamController<bool>.broadcast();
+
+  /// Whether a subnet sweep is in flight — drives the refresh spinner.
+  bool get scanning => _scanning;
+
+  Stream<bool> get scanningStream => _scanController.stream;
 
   /// First non-loopback IPv4 address — used for QR/manual connect hints.
   static Future<String?> primaryIpv4() async {
@@ -56,10 +63,51 @@ class DiscoveryService {
     if (_started) return;
     _started = true;
     await _startBonsoir();
-    // Scan once soon, then periodically — cheap and catches peers mDNS misses.
+    // One scan pass at launch. After that, discovery is manual: the
+    // refresh button calls [scanNow], no continuous searching.
     unawaited(Future.delayed(const Duration(seconds: 2), scanLocalSubnets));
-    _scanTimer = Timer.periodic(const Duration(seconds: 45), (_) {
-      unawaited(scanLocalSubnets());
+    _armDiscoveryStop(const Duration(seconds: 15));
+  }
+
+  /// Manual refresh: re-open the mDNS listener for a short window and
+  /// sweep the subnets once, then shut the listener back down.
+  Future<void> scanNow() async {
+    if (_discovery == null && _started) {
+      try {
+        final d = BonsoirDiscovery(type: kBonsoirType);
+        await d.initialize();
+        _wireDiscovery(d);
+        await d.start();
+        _discovery = d;
+      } catch (_) {}
+    }
+    _armDiscoveryStop(const Duration(seconds: 15));
+    // Manual scans always deep-probe alternate ports — the user asked
+    // once, so one pass should find everyone it can.
+    unawaited(scanLocalSubnets(deep: true));
+  }
+
+  void _armDiscoveryStop(Duration delay) {
+    _discoveryStopTimer?.cancel();
+    _discoveryStopTimer = Timer(delay, () {
+      unawaited(_discovery?.stop());
+      _discovery = null;
+    });
+  }
+
+  void _wireDiscovery(BonsoirDiscovery d) {
+    d.eventStream!.listen((event) {
+      switch (event) {
+        case BonsoirDiscoveryServiceFoundEvent(service: final s):
+          d.serviceResolver.resolveService(s);
+        case BonsoirDiscoveryServiceResolvedEvent(service: final s):
+          unawaited(_handleResolved(s));
+        case BonsoirDiscoveryServiceUpdatedEvent(service: final s):
+          unawaited(_handleResolved(s));
+        case BonsoirDiscoveryServiceLostEvent(service: final s):
+          _markGone(s);
+        default:
+      }
     });
   }
 
@@ -85,22 +133,11 @@ class DiscoveryService {
     }
 
     try {
-      _discovery = BonsoirDiscovery(type: kBonsoirType);
-      await _discovery!.initialize();
-      _discovery!.eventStream!.listen((event) {
-        switch (event) {
-          case BonsoirDiscoveryServiceFoundEvent(service: final s):
-            _discovery!.serviceResolver.resolveService(s);
-          case BonsoirDiscoveryServiceResolvedEvent(service: final s):
-            unawaited(_handleResolved(s));
-          case BonsoirDiscoveryServiceUpdatedEvent(service: final s):
-            unawaited(_handleResolved(s));
-          case BonsoirDiscoveryServiceLostEvent(service: final s):
-            _markGone(s);
-          default:
-        }
-      });
-      await _discovery!.start();
+      final d = BonsoirDiscovery(type: kBonsoirType);
+      await d.initialize();
+      _wireDiscovery(d);
+      await d.start();
+      _discovery = d;
     } catch (_) {
       _discovery = null;
     }
@@ -209,13 +246,18 @@ class DiscoveryService {
   /// probes the first few alternate ports on hosts that miss the base port —
   /// mDNS can drop out, and a device that could not bind kBasePort would
   /// otherwise never appear.
-  Future<void> scanLocalSubnets() async {
+  Future<void> scanLocalSubnets({bool deep = false}) async {
+    // Remember an explicit deep request: if a shallower pass is already
+    // running we follow it with a deep one instead of dropping the ask.
+    _deepQueued = _deepQueued || deep;
     if (_scanning) return;
     _scanning = true;
+    _scanController.add(true);
     try {
       await _revalidateKnown();
       final subnets = await _localSubnets();
-      final deep = ++_scanCycle % 4 == 0;
+      deep = _deepQueued || ++_scanCycle % 4 == 0;
+      _deepQueued = false;
       final jobs = <Future<void>>[];
       for (final prefix in subnets) {
         for (var i = 1; i < 255; i++) {
@@ -230,6 +272,14 @@ class DiscoveryService {
       await Future.wait(jobs);
     } finally {
       _scanning = false;
+      _scanController.add(false);
+      // Repaint so peers whose lastSeen has aged show as offline even
+      // though nothing new was (re)discovered this pass.
+      _peersController.add(Map.of(_peers));
+      if (_deepQueued) {
+        _deepQueued = false;
+        unawaited(scanLocalSubnets(deep: true));
+      }
     }
   }
 
@@ -314,7 +364,8 @@ class DiscoveryService {
     final completer = Completer<Peer?>();
     _pendingVerifyCode = code;
     _pendingCodeCompleter = completer;
-    unawaited(scanLocalSubnets());
+    // scanNow also re-opens the mDNS listener if its window has closed.
+    unawaited(scanNow());
     final peer = await completer.future
         .timeout(const Duration(seconds: 20), onTimeout: () => null);
     if (_pendingVerifyCode == code) {
@@ -380,7 +431,7 @@ class DiscoveryService {
   }
 
   Future<void> dispose() async {
-    _scanTimer?.cancel();
+    _discoveryStopTimer?.cancel();
     try {
       await _broadcast?.stop();
     } catch (_) {}
@@ -389,5 +440,6 @@ class DiscoveryService {
     } catch (_) {}
     _http.close();
     await _peersController.close();
+    await _scanController.close();
   }
 }
