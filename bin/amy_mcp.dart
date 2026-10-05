@@ -374,14 +374,27 @@ class _AmyClient {
   Future<Map<String, dynamic>> delete(String p) => _req('DELETE', p, null);
 
   /// Pushes local file bytes into the app's staging dir (sandbox-safe).
+  /// Strict scope mode refuses staging — pass the real paths instead so
+  /// the app can verify and read them itself.
   Future<List<String>> stageAll(Iterable<String> paths) async {
+    try {
+      final scope = await get('scope');
+      if ((scope['scope'] as Map?)?['strict'] == true) {
+        return paths.toList();
+      }
+    } on _RpcError {
+      rethrow;
+    } catch (_) {}
     final out = <String>[];
     for (final p in paths) {
       final f = File(p);
       if (!await f.exists()) throw _RpcError(-32602, '本机文件不存在: $p');
       final name = p.split(Platform.pathSeparator).last;
       final req = await client.openUrl(
-          'POST', _u(await port, 'stage?name=${Uri.encodeComponent(name)}'));
+          'POST',
+          _u(await port,
+              'stage?name=${Uri.encodeComponent(name)}'
+              '&source=${Uri.encodeComponent(p)}'));
       if (_token.isNotEmpty) req.headers.set('x-amy-token', _token);
       req.headers.contentType = ContentType.binary;
       req.contentLength = await f.length();

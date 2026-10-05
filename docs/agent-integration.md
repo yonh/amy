@@ -32,7 +32,7 @@ agent 发起的 `send` / `plans` 只能读取白名单目录里的文件：配�
 | --- | --- |
 | `GET /identity` | 本机指纹/别名/端口/接收目录 |
 | `GET /peers` | 已知设备 + 在线状态 |
-| `POST /stage?name=` | 推送文件字节 → 返回 app 内暂存路径（沙盒安全） |
+| `POST /stage?name=&source=` | 推送文件字节 → 返回暂存路径；`source` 声明真实来源供白名单校验（严格模式 403） |
 | `POST /send` `{peer, paths}` | 立即发送（对方在线；接收仍需对方接受） |
 | `GET /message?id=` | 传输状态/进度 |
 | `GET /offers` / `POST /answer?id=&accept=` | 待确认的传入文件 / 接受或拒绝 |
@@ -45,7 +45,11 @@ agent 发起的 `send` / `plans` 只能读取白名单目录里的文件：配�
 | `POST /remote-files` `{member, token?}` | 主控：列出成员设备的文件（成员批准后才返回） |
 
 > macOS 沙盒下 app 读不到任意路径——所以 CLI/MCP 一律先经 `/stage` 把字节
-> 推进 app 暂存目录再按路径引用。直接给 `send` 传本机路径在非沙盒平台也可行。
+> 推进 app 暂存目录再按路径引用，暂存时附带 `?source=<原路径>` 声明来源；
+> 白名单校验针对的是这个声明来源，无声明的暂存文件一律视为目录外。
+> **严格模式下 `/stage` 直接 403**：暂存字节无法核实来源，此时 CLI/MCP 跳过
+> 暂存、以真实路径调用 `send`/`plans`，由 app 校验白名单并自行读取。
+> 直接给 `send` 传本机路径在非沙盒平台也可行。
 
 ## CLI（skill + 命令行方式）
 

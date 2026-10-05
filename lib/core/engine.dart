@@ -66,6 +66,13 @@ class TransferEngine extends ChangeNotifier {
   /// Filesystem isolation for agent sends (persisted in SharedPreferences).
   SecurityScope securityScope = SecurityScope();
 
+  /// staged dest path -> the origin path its uploader claimed (via the
+  /// `source` param). Staged payloads are opaque, so the scope gate
+  /// checks this claim; a staged path with no claim is unverifiable and
+  /// counts as out-of-scope. Memory-only: after a restart staged files
+  /// revert to unverifiable, which fails closed under strict mode.
+  final stagedSources = <String, String>{};
+
   /// Pending AI/agent actions awaiting the user's tap.
   final _approvals = <String, AgentAction>{};
 
@@ -265,8 +272,16 @@ class TransferEngine extends ChangeNotifier {
     try {
       if (p.agentCreated) {
         final denied = <String>[];
+        final staging = (await files.stagingDir()).path;
         for (final x in p.filePaths) {
-          if (!await pathInScope(x)) {
+          // Staged paths re-check their recorded origin claim; a staged
+          // file with none is unverifiable and counts as outside.
+          final claimed = stagedSources[x];
+          final effective =
+              x.startsWith('$staging${Platform.pathSeparator}')
+                  ? claimed
+                  : x;
+          if (effective == null || !await pathInScope(effective)) {
             denied.add(x.split(Platform.pathSeparator).last);
           }
         }
@@ -292,7 +307,7 @@ class TransferEngine extends ChangeNotifier {
       if (p.status != PlanStatus.pending) return;
       final pe = peers[p.peerFingerprint];
       if (pe == null || !pe.online) return;
-      final files = [
+      final tf = [
         for (final x in p.filePaths)
           TransferFile(
             id: randomId(),
@@ -303,7 +318,7 @@ class TransferEngine extends ChangeNotifier {
       ];
       // Set messageId before flipping status so a tick running mid-await
       // never sees `running` with no message and marks the plan failed.
-      p.messageId = (await sendFiles(pe, files)).id;
+      p.messageId = (await sendFiles(pe, tf)).id;
       p.status = PlanStatus.running;
       p.peerAlias = pe.alias;
     } finally {

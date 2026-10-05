@@ -25,6 +25,6 @@ dart run bin/amy_cli.dart status <messageId>             # 查一次传输
 ## 注意
 
 - 发送是「请求-接受」语义：发送后接收端要点「接受」；也可用 `offers` + `answer` 在接收端处理。
-- 文件字节先经 `/api/v1/agent/stage` 暂存到 app 目录（macOS 沙盒无法直读任意路径），CLI 自动处理。
+- 文件字节先经 `/api/v1/agent/stage` 暂存到 app 目录（macOS 沙盒无法直读任意路径），CLI 自动处理并声明来源路径；安全隔离严格模式下暂存被拒，CLI 自动改用真实路径发送。
 - 接收的文件落在 amy 的接收目录（`GET /api/v1/agent/identity` 的 `downloads` 字段）。
 - 若报「找不到运行中的 amy」：先启动 amy app。

@@ -183,14 +183,28 @@ amy_cli — 控制运行中的 amy
 }
 
 /// Pushes file bytes into the app's staging dir so sandboxed apps can
-/// always read them (macOS can't open arbitrary user paths).
+/// always read them (macOS can't open arbitrary user paths). In strict
+/// scope mode staging is refused — the app verifies and reads the real
+/// paths itself, so we skip staging and send them unchanged.
 Future<List<String>> _stageAll(_Api api, Iterable<String> paths) async {
+  try {
+    final scope = await api.get('scope');
+    if ((scope['scope'] as Map?)?['strict'] == true) {
+      stdout.writeln('严格模式：跳过暂存，以真实路径发送（app 按白名单校验）');
+      return paths.toList();
+    }
+  } on _ApiError {
+    rethrow;
+  } catch (_) {}
   final out = <String>[];
   for (final p in paths) {
     final f = File(p);
     if (!await f.exists()) throw _ApiError(0, '本机文件不存在: $p');
     final name = p.split(Platform.pathSeparator).last;
-    final j = await api.postStream('stage?name=${Uri.encodeComponent(name)}', f);
+    final j = await api.postStream(
+        'stage?name=${Uri.encodeComponent(name)}'
+        '&source=${Uri.encodeComponent(p)}',
+        f);
     out.add(j['path'] as String);
     stdout.writeln('已暂存 $name → ${j['path']}');
   }

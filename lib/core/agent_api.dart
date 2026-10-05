@@ -197,9 +197,19 @@ class AgentApi {
   Future<List<String>?> _checkScope(
       HttpRequest req, List<TransferFile> fs) async {
     final denied = <String>[];
+    final staging = (await files.stagingDir()).path;
     for (final f in fs) {
-      // Staged files always live inside the app's own staging root.
-      if (!await engine.pathInScope(f.path ?? '')) {
+      final p = f.path ?? '';
+      final isStaged =
+          p.startsWith('$staging${Platform.pathSeparator}');
+      // Staged bytes are opaque: check the caller-claimed origin recorded
+      // at stage time, not the (always-allowed) staging path. No claim —
+      // e.g. bytes a process wrote into the staging dir itself — means
+      // the origin is unverifiable and counts as outside.
+      final claimed = engine.stagedSources[p];
+      final effective = isStaged ? claimed : p;
+      if (effective == null ||
+          !await engine.pathInScope(effective)) {
         denied.add(f.name);
       }
     }
@@ -251,6 +261,16 @@ class AgentApi {
       _json(req, 403, {'error': 'AI mode is off'});
       return;
     }
+    // Strict mode cannot scope-check opaque bytes, so staging is refused
+    // outright: clients pass the real path to send/plans and the app
+    // verifies + reads it itself.
+    if (engine.securityScope.strict) {
+      _json(req, 403, {
+        'error': 'staging disabled in strict mode',
+        'hint': '严格模式下直接以真实路径调用 send/plans，app 会按白名单校验并自行读取',
+      });
+      return;
+    }
     final dir = await files.stagingDir();
     final dest = '${dir.path}/${randomId(4)}-$name';
     final sink = File(dest).openWrite();
@@ -263,6 +283,20 @@ class AgentApi {
       await sink.flush();
     } finally {
       await sink.close();
+    }
+    // The stager declares where the bytes came from (`source`); the scope
+    // gate checks that claim instead of the always-allowed staging path.
+    // When the app can read the claimed source itself, a size mismatch
+    // exposes a dishonest claim right here.
+    final source = req.uri.queryParameters['source'];
+    if (source != null && source.isNotEmpty) {
+      final sf = File(source);
+      if (await sf.exists() && await sf.length() != size) {
+        await File(dest).delete();
+        _json(req, 400, {'error': 'claimed source size mismatch'});
+        return;
+      }
+      engine.stagedSources[dest] = source;
     }
     _json(req, 200, {'path': dest, 'size': size});
   }
