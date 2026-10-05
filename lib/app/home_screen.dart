@@ -53,6 +53,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final wide = MediaQuery.of(context).size.width >= 720;
+    // 320 (device list) + 340 (AI panel) + a workable session needs ~1080.
+    final threePane = MediaQuery.of(context).size.width >= 1080;
     final nearby = ref.watch(nearbyProvider);
     final threaded = ref.watch(threadedPeersProvider);
     final scanning = nearby.isEmpty;
@@ -78,16 +80,23 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     child: _deviceList(nearby, threaded, scanning),
                   ),
                   const VerticalDivider(width: 1),
+                  // Three fixed panes only fit once there's real room —
+                  // at ~720px a 340px sidebar would leave the session
+                  // unusable, so the AI panel replaces the detail pane.
                   Expanded(
-                    child: _selected == null
-                        ? const _EmptyDetail()
-                        : SessionScreen(
-                            key: ValueKey(_selected!.fingerprint),
-                            peer: _selected!,
-                            embedded: true,
-                          ),
+                    child: _aiOpen && !threePane
+                        ? AiPanel(
+                            onClose: () => setState(() => _aiOpen = false),
+                          )
+                        : _selected == null
+                            ? const _EmptyDetail()
+                            : SessionScreen(
+                                key: ValueKey(_selected!.fingerprint),
+                                peer: _selected!,
+                                embedded: true,
+                              ),
                   ),
-                  if (_aiOpen) ...[
+                  if (_aiOpen && threePane) ...[
                     const VerticalDivider(width: 1),
                     SizedBox(
                       width: 340,

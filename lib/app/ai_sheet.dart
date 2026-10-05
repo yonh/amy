@@ -1,17 +1,32 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
 
 import '../state/providers.dart';
 import 'approvals_card.dart';
 import 'settings_sheet.dart';
 import 'theme.dart';
 
-class _Entry {
-  _Entry(this.mine, this.text);
+class AiChatEntry {
+  const AiChatEntry(this.mine, this.text);
 
   final bool mine;
   final String text;
 }
+
+/// Chat history kept above the widget tree so closing/reopening the
+/// panel (or drawer) doesn't wipe the conversation.
+class AiChatLog extends ChangeNotifier {
+  final entries = <AiChatEntry>[];
+
+  void add(bool mine, String text) {
+    entries.add(AiChatEntry(mine, text));
+    notifyListeners();
+  }
+}
+
+final aiChatLogProvider =
+    ChangeNotifierProvider<AiChatLog>((_) => AiChatLog());
 
 /// Chat panel for the in-app AI assistant, embedded as a sidebar next to
 /// the main content (inline on wide layouts, end-drawer on phones).
@@ -29,7 +44,6 @@ class AiPanel extends ConsumerStatefulWidget {
 
 class _AiPanelState extends ConsumerState<AiPanel> {
   final _input = TextEditingController();
-  final _entries = <_Entry>[];
   bool _busy = false;
 
   @override
@@ -41,8 +55,9 @@ class _AiPanelState extends ConsumerState<AiPanel> {
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _busy) return;
+    final log = ref.read(aiChatLogProvider);
     setState(() {
-      _entries.add(_Entry(true, text));
+      log.add(true, text);
       _busy = true;
       _input.clear();
     });
@@ -52,23 +67,24 @@ class _AiPanelState extends ConsumerState<AiPanel> {
     } catch (e) {
       reply = '出错了: $e';
     }
+    log.add(false, reply);
     if (!mounted) return;
-    setState(() {
-      _entries.add(_Entry(false, reply));
-      _busy = false;
-    });
+    setState(() => _busy = false);
   }
 
   @override
   Widget build(BuildContext context) {
     final engine = ref.watch(engineProvider);
     final configured = engine.llmConfig.configured;
+    final entries = ref.watch(aiChatLogProvider).entries;
+    // Scaffold.resizeToAvoidBottomInset already shrinks us for the
+    // keyboard — padding by viewInsets again would double-count it.
     return Padding(
-      padding: EdgeInsets.only(
+      padding: const EdgeInsets.only(
         left: 16,
         right: 16,
         top: 18,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 12,
+        bottom: 12,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -102,7 +118,7 @@ class _AiPanelState extends ConsumerState<AiPanel> {
           // is waiting on stays reachable while the panel is open.
           const AgentApprovals(),
           Expanded(
-            child: _entries.isEmpty
+            child: entries.isEmpty
                 ? Center(
                     child: Text(
                       '试试:把 xx 文件发给 iPhone · 查看在线设备',
@@ -113,7 +129,7 @@ class _AiPanelState extends ConsumerState<AiPanel> {
                   )
                 : ListView(
                     children: [
-                      for (final e in _entries)
+                      for (final e in entries)
                         Align(
                           alignment: e.mine
                               ? Alignment.centerRight
