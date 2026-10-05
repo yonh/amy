@@ -321,7 +321,9 @@ class TransferEngine extends ChangeNotifier {
               'send',
               denied.isNotEmpty
                   ? '计划发送含白名单外文件: ${denied.join(', ')}'
-                  : '计划发送超过自动批准大小',
+                  : '计划发送超过自动批准大小: '
+                      '${p.filePaths.map((x) => x.split(Platform.pathSeparator).last).join(', ')} '
+                      '→ ${peer.alias}',
               total,
               remote: false,
               forceConfirm: denied.isNotEmpty);
@@ -340,6 +342,13 @@ class TransferEngine extends ChangeNotifier {
       if (p.status != PlanStatus.pending) return;
       final pe = peers[p.peerFingerprint];
       if (pe == null || !pe.online) return;
+      // The mode-off check at dispatch start can be stale by now —
+      // re-check so switching AI off mid-flight still stops the send.
+      if (p.agentCreated && aiPolicy.mode == AiMode.off) {
+        p.status = PlanStatus.failed;
+        p.error = 'AI 模式已关闭';
+        return;
+      }
       final tf = [
         for (final x in p.filePaths)
           TransferFile(

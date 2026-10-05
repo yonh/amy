@@ -68,6 +68,11 @@ class _AiSheetState extends ConsumerState<AiSheet> {
   Widget build(BuildContext context) {
     final engine = ref.watch(engineProvider);
     final configured = engine.llmConfig.configured;
+    // With the keyboard up plus an approval card, the fixed chat area
+    // would overflow the sheet and push the input/approve controls off
+    // screen — shrink it to whatever space is actually left.
+    final mq = MediaQuery.of(context);
+    final avail = mq.size.height - mq.viewInsets.bottom;
     return Padding(
       padding: EdgeInsets.only(
         left: 16,
@@ -94,7 +99,9 @@ class _AiSheetState extends ConsumerState<AiSheet> {
           // approve the very send this conversation is waiting on.
           const AgentApprovals(),
           ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 320, minHeight: 80),
+            constraints: BoxConstraints(
+                maxHeight: (avail - 280).clamp(80.0, 320.0),
+                minHeight: 80),
             child: _entries.isEmpty
                 ? Center(
                     child: Text(
