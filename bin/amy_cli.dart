@@ -103,6 +103,26 @@ Future<int> main(List<String> args) async {
           default:
             return _err('用法: policy [mode|auto-mb|remote|rotate] ...');
         }
+      case 'scope':
+        if (rest.isEmpty) {
+          _print(await api.get('scope'));
+          break;
+        }
+        switch (rest.first) {
+          case 'add':
+            if (rest.length < 2) return _err('用法: scope add <目录>');
+            _print(await api.post('scope', {'add': _dirArg(rest[1])}));
+          case 'remove':
+            if (rest.length < 2) return _err('用法: scope remove <目录>');
+            _print(await api.post('scope', {'remove': _dirArg(rest[1])}));
+          case 'strict':
+            if (rest.length < 2 || (rest[1] != 'on' && rest[1] != 'off')) {
+              return _err('用法: scope strict on|off');
+            }
+            _print(await api.post('scope', {'strict': rest[1] == 'on'}));
+          default:
+            return _err('用法: scope [add|remove|strict] ...');
+        }
       case 'actions':
         final j = await api.get('actions');
         for (final a in (j['actions'] as List).cast<Map<String, dynamic>>()) {
@@ -158,18 +178,33 @@ amy_cli — 控制运行中的 amy
   amy actions                            待审批的 AI 操作（批准须在 app 里点）
   amy remote-send <成员> <目标> <成员上的路径...> [--token T]  指挥成员设备发送
   amy remote-files <成员> [--token T]    列出成员设备可发送的文件（需成员批准）
+  amy scope [add <目录>|remove <目录>|strict on|off]  agent 可读目录白名单
 ''');
 }
 
 /// Pushes file bytes into the app's staging dir so sandboxed apps can
-/// always read them (macOS can't open arbitrary user paths).
+/// always read them (macOS can't open arbitrary user paths). In strict
+/// scope mode staging is refused — the app verifies and reads the real
+/// paths itself, so we skip staging and send them unchanged.
 Future<List<String>> _stageAll(_Api api, Iterable<String> paths) async {
+  try {
+    final scope = await api.get('scope');
+    if ((scope['scope'] as Map?)?['strict'] == true) {
+      stdout.writeln('严格模式：跳过暂存，以真实路径发送（app 按白名单校验）');
+      return paths.toList();
+    }
+  } on _ApiError {
+    rethrow;
+  } catch (_) {}
   final out = <String>[];
   for (final p in paths) {
     final f = File(p);
     if (!await f.exists()) throw _ApiError(0, '本机文件不存在: $p');
     final name = p.split(Platform.pathSeparator).last;
-    final j = await api.postStream('stage?name=${Uri.encodeComponent(name)}', f);
+    final j = await api.postStream(
+        'stage?name=${Uri.encodeComponent(name)}'
+        '&source=${Uri.encodeComponent(p)}',
+        f);
     out.add(j['path'] as String);
     stdout.writeln('已暂存 $name → ${j['path']}');
   }
@@ -180,6 +215,10 @@ String _abs(String p) {
   if (p.startsWith('/')) return p;
   return '${Directory.current.path}/$p';
 }
+
+/// Directory args keep a leading `~` (the app expands it server-side);
+/// relative paths resolve against the cwd like files.
+String _dirArg(String p) => p.startsWith('~') ? p : _abs(p);
 
 String? _flag(List<String> args, String name) {
   final i = args.indexOf(name);

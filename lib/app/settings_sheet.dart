@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:file_picker/file_picker.dart';
+
 import '../core/identity.dart';
 import '../core/models.dart';
 import '../state/providers.dart';
@@ -94,6 +96,8 @@ class _SettingsSheetState extends ConsumerState<SettingsSheet> {
             _infoRow('协议版本', 'v1 · 局域网明文传输'),
             const SizedBox(height: 20),
             _AiSection(),
+            const SizedBox(height: 20),
+            _ScopeSection(),
           ],
         ),
       ),
@@ -229,6 +233,85 @@ class _AiSection extends ConsumerWidget {
             style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
           ),
         ],
+      ],
+    );
+  }
+}
+
+/// Filesystem isolation: which directories agent-initiated sends may
+/// read from, and whether out-of-scope files are denied outright.
+class _ScopeSection extends ConsumerWidget {
+  Future<void> _pickDir(WidgetRef ref) async {
+    final engine = ref.read(engineProvider);
+    final dir = await FilePicker.getDirectoryPath(
+        dialogTitle: '选择允许的目录');
+    if (dir == null) return;
+    final s = engine.securityScope;
+    if (!s.dirs.contains(dir)) {
+      s.dirs.add(dir);
+      await engine.setSecurityScope(s);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final engine = ref.watch(engineProvider);
+    final s = engine.securityScope;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text('安全隔离',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+        const SizedBox(height: 4),
+        Text('agent 只能发送白名单目录里的文件（应用暂存目录始终允许）',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+        const SizedBox(height: 10),
+        if (s.dirs.isEmpty)
+          Text('尚未添加目录 — 仅允许应用自己的文件',
+              style: TextStyle(fontSize: 13, color: Colors.grey.shade700)),
+        for (final d in s.dirs)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 3),
+            child: Row(
+              children: [
+                const Icon(Icons.folder_outlined, size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(d,
+                      style: const TextStyle(fontSize: 13),
+                      overflow: TextOverflow.ellipsis),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, size: 16),
+                  tooltip: '移除',
+                  onPressed: () {
+                    s.dirs.remove(d);
+                    engine.setSecurityScope(s);
+                  },
+                ),
+              ],
+            ),
+          ),
+        OutlinedButton.icon(
+          icon: const Icon(Icons.add, size: 18),
+          label: const Text('添加允许目录'),
+          onPressed: () => _pickDir(ref),
+        ),
+        const SizedBox(height: 6),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('严格模式', style: TextStyle(fontSize: 14)),
+          subtitle: Text(
+            '关闭：目录外文件可逐次批准；开启：目录外一律拒绝',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+          ),
+          value: s.strict,
+          onChanged: (v) {
+            s.strict = v;
+            engine.setSecurityScope(s);
+          },
+        ),
       ],
     );
   }

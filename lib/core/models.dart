@@ -166,6 +166,47 @@ class AiPolicy {
       );
 }
 
+/// Filesystem isolation for agent-initiated sends: paths must resolve
+/// inside one of [dirs] (or the app's own staging/download dirs, which
+/// are always allowed).
+class SecurityScope {
+  SecurityScope({List<String>? dirs, this.strict = false})
+      : dirs = dirs ?? <String>[];
+
+  /// Absolute directory paths agents may read from. A leading `~` is
+  /// expanded to the user's home dir.
+  List<String> dirs;
+
+  /// true: out-of-scope paths are refused outright (403).
+  /// false: they pop a local approval card instead.
+  bool strict;
+
+  Map<String, dynamic> toJson() => {'dirs': dirs, 'strict': strict};
+
+  factory SecurityScope.fromJson(Map<String, dynamic>? j) => SecurityScope(
+        dirs: (j?['dirs'] as List?)
+            ?.map((e) => e as String)
+            .where((e) => e.isNotEmpty)
+            .toList(),
+        strict: j?['strict'] as bool? ?? false,
+      );
+}
+
+/// Lexical containment test (pure — symlinks should be resolved by the
+/// caller before this). [path] and every entry of [roots] are expected to
+/// be absolute and normalized.
+bool pathWithinRoots(String path, List<String> roots) {
+  // Compare on forward slashes so Windows-style canonical paths still match.
+  final p = path.replaceAll('\\', '/').replaceAll('//', '/');
+  for (final r in roots) {
+    var root = r.replaceAll('\\', '/');
+    if (root.endsWith('/')) root = root.substring(0, root.length - 1);
+    if (root.isEmpty) continue;
+    if (p == root || p.startsWith('$root/')) return true;
+  }
+  return false;
+}
+
 FileKind fileKindFor(String name) {
   final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
   const images = {
@@ -332,6 +373,7 @@ class SendPlan {
     required this.filePaths,
     this.runAt,
     this.status = PlanStatus.pending,
+    this.agentCreated = false,
     DateTime? createdAt,
     this.messageId,
     this.error,
@@ -346,6 +388,10 @@ class SendPlan {
   final DateTime? runAt;
   PlanStatus status;
   final DateTime createdAt;
+
+  /// Created through the agent API (vs the in-app plans UI). Agent plans
+  /// are re-checked against the security scope at dispatch time.
+  final bool agentCreated;
 
   /// The transfer message spawned by this plan, once dispatched.
   String? messageId;
@@ -374,6 +420,7 @@ class SendPlan {
         runAt: DateTime.tryParse(j['runAt'] as String? ?? ''),
         status: PlanStatus.values
             .firstWhere((s) => s.name == j['status'], orElse: () => PlanStatus.failed),
+        agentCreated: j['agent'] == true,
         createdAt: DateTime.tryParse(j['createdAt'] as String? ?? ''),
         messageId: j['messageId'] as String?,
         error: j['error'] as String?,

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p2;
 
 import 'agent_api.dart';
 import 'discovery.dart';
@@ -62,6 +63,16 @@ class TransferEngine extends ChangeNotifier {
   /// Leader-side: member fingerprint -> remote Bearer token.
   Map<String, String> _remoteTokens = {};
 
+  /// Filesystem isolation for agent sends (persisted in SharedPreferences).
+  SecurityScope securityScope = SecurityScope();
+
+  /// staged dest path -> the origin path its uploader claimed (via the
+  /// `source` param). Staged payloads are opaque, so the scope gate
+  /// checks this claim; a staged path with no claim is unverifiable and
+  /// counts as out-of-scope. Memory-only: after a restart staged files
+  /// revert to unverifiable, which fails closed under strict mode.
+  final stagedSources = <String, String>{};
+
   /// Pending AI/agent actions awaiting the user's tap.
   final _approvals = <String, AgentAction>{};
 
@@ -93,6 +104,7 @@ class TransferEngine extends ChangeNotifier {
     await discovery.start();
     aiPolicy = await loadAiPolicy();
     _remoteTokens = await loadRemoteTokens();
+    securityScope = await loadSecurityScopeOrSeed();
     identity.agentCapable = aiPolicy.allowRemoteControl;
     _agentToken = randomId(16);
     unawaited(_writeAgentEndpoint());
@@ -178,13 +190,15 @@ class TransferEngine extends ChangeNotifier {
 
   /// Schedules a send: at [runAt] (null = the next time the peer is online).
   /// The plan stays pending if the peer is offline when due.
-  SendPlan createPlan(Peer peer, List<String> filePaths, {DateTime? runAt}) {
+  SendPlan createPlan(Peer peer, List<String> filePaths,
+      {DateTime? runAt, bool agent = false}) {
     final p = SendPlan(
       id: randomId(),
       peerFingerprint: peer.fingerprint,
       peerAlias: peer.alias,
       filePaths: List.of(filePaths),
       runAt: runAt,
+      agentCreated: agent,
     );
     plans.add(p);
     _persist();
@@ -236,9 +250,66 @@ class TransferEngine extends ChangeNotifier {
         dirty = true;
         continue;
       }
-      p.status = PlanStatus.running;
-      p.peerAlias = peer.alias;
-      final files = [
+      if (!_dispatchingPlans.add(p.id)) continue;
+      dirty = true;
+      unawaited(
+        _dispatchPlan(p, peer)
+            .whenComplete(() => _dispatchingPlans.remove(p.id)),
+      );
+    }
+    if (dirty) _persist();
+  }
+
+  /// Plans mid-dispatch (async scope re-check + send kickoff) so the tick
+  /// loop doesn't start them twice.
+  final _dispatchingPlans = <String>{};
+
+  /// Dispatches a due plan. Agent-created plans are re-validated against
+  /// the CURRENT security scope here — the whitelist may have tightened
+  /// since the plan was queued. Strict mode fails the plan; otherwise a
+  /// confirm card asks the user (AI mode off denies as well).
+  Future<void> _dispatchPlan(SendPlan p, Peer peer) async {
+    try {
+      if (p.agentCreated) {
+        final denied = <String>[];
+        final staging = canonPath((await files.stagingDir()).path) ?? '';
+        for (final x in p.filePaths) {
+          // Canonicalize first so disguised paths can't dodge the
+          // staged check; staged files re-check their recorded origin
+          // claim — none means unverifiable and counts as outside.
+          final cp = canonPath(x);
+          final isStaged = cp != null &&
+              staging.isNotEmpty &&
+              cp.startsWith('$staging${Platform.pathSeparator}');
+          final claimed = cp == null ? null : stagedSources[cp];
+          final effective = isStaged ? claimed : cp;
+          if (effective == null || !await pathInScope(effective)) {
+            denied.add(x.split(Platform.pathSeparator).last);
+          }
+        }
+        if (denied.isNotEmpty) {
+          final total = p.filePaths
+              .fold(0, (s, x) => s + File(x).lengthSync());
+          final ok = !securityScope.strict &&
+              await agentApprove(
+                  'plan',
+                  '计划发送含白名单外文件: ${denied.join(', ')}',
+                  total,
+                  remote: false,
+                  forceConfirm: true);
+          if (!ok) {
+            p.status = PlanStatus.failed;
+            p.error = '安全隔离:文件不在允许目录内: ${denied.first}';
+            return;
+          }
+        }
+      }
+      // The plan may have been cancelled, or the peer dropped, while the
+      // async checks ran.
+      if (p.status != PlanStatus.pending) return;
+      final pe = peers[p.peerFingerprint];
+      if (pe == null || !pe.online) return;
+      final tf = [
         for (final x in p.filePaths)
           TransferFile(
             id: randomId(),
@@ -247,15 +318,15 @@ class TransferEngine extends ChangeNotifier {
             path: x,
           ),
       ];
-      unawaited(
-        sendFiles(peer, files).then((m) {
-          p.messageId = m.id;
-          _persist();
-        }),
-      );
-      dirty = true;
+      // Set messageId before flipping status so a tick running mid-await
+      // never sees `running` with no message and marks the plan failed.
+      p.messageId = (await sendFiles(pe, tf)).id;
+      p.status = PlanStatus.running;
+      p.peerAlias = pe.alias;
+    } finally {
+      _persist();
+      notifyListeners();
     }
-    if (dirty) _persist();
   }
 
   // ------------------------------------------------------------ agent hooks
@@ -316,24 +387,78 @@ class TransferEngine extends ChangeNotifier {
     await saveRemoteTokens(_remoteTokens);
   }
 
+  Future<void> setSecurityScope(SecurityScope s) async {
+    securityScope = s;
+    await saveSecurityScope(s);
+    notifyListeners();
+  }
+
+  /// Directories agent sends may read from: the configured scope dirs
+  /// (with `~` expanded) plus the app's own staging and download dirs,
+  /// which are always allowed so staged/received files can be re-sent.
+  Future<List<String>> allowedRoots() async {
+    final home =
+        Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
+    final roots = <String>[];
+    for (final d in securityScope.dirs) {
+      var e = d.trim();
+      if (e.isEmpty) continue;
+      if (e.startsWith('~') && home != null) {
+        e = home + e.substring(1);
+      }
+      final c = _canon(e);
+      if (c != null) roots.add(c);
+    }
+    final staging = _canon((await files.stagingDir()).path);
+    if (staging != null) roots.add(staging);
+    final dl = _canon(downloads.path);
+    if (dl != null) roots.add(dl);
+    return roots.toSet().toList();
+  }
+
+  /// True when [path] resolves inside an allowed root. A path whose
+  /// symlinks cannot be resolved counts as outside — fail-safe.
+  Future<bool> pathInScope(String path) async {
+    final c = _canon(path);
+    return c != null && pathWithinRoots(c, await allowedRoots());
+  }
+
+  /// Public wrapper for the canonicalizer — the agent API needs it to
+  /// detect staged paths before trusting recorded origin claims.
+  String? canonPath(String path) => _canon(path);
+
+  /// Normalized absolute path with symlinks resolved, or null when
+  /// resolution fails (broken link / permission) — treat as unverifiable.
+  String? _canon(String path) {
+    var p = p2.normalize(File(path).absolute.path);
+    try {
+      p = File(p).resolveSymbolicLinksSync();
+    } catch (_) {
+      return null;
+    }
+    return p;
+  }
+
   /// Decides whether an agent action may proceed.
   ///  - remote (leader-instructed) calls ALWAYS need the user's tap;
   ///  - mode off refuses outright;
   ///  - ask requires a tap;
-  ///  - auto passes unless the transfer exceeds autoApproveBytes.
+  ///  - auto passes unless the transfer exceeds autoApproveBytes or
+  ///    [forceConfirm] is set (e.g. an out-of-scope path).
   /// Approval waits up to 60s; unanswered = denied.
   Future<bool> agentApprove(
     String kind,
     String label,
     int bytes, {
     required bool remote,
+    bool forceConfirm = false,
   }) async {
     if (aiPolicy.mode == AiMode.off) return false;
     if (remote ||
         aiPolicy.mode == AiMode.ask ||
         (aiPolicy.mode == AiMode.auto &&
-            kind == 'send' &&
-            bytes > aiPolicy.autoApproveBytes)) {
+            ((forceConfirm) ||
+                (kind == 'send' && bytes > aiPolicy.autoApproveBytes)))) {
       final a = AgentAction(
         id: randomId(),
         kind: kind,

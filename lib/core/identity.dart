@@ -139,3 +139,40 @@ Future<void> saveRemoteTokens(Map<String, String> tokens) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.setString('ai.remoteTokens', jsonEncode(tokens));
 }
+
+/// Filesystem isolation for agent sends — persisted under 'security.scope'.
+Future<SecurityScope> loadSecurityScope() async {
+  final prefs = await SharedPreferences.getInstance();
+  final raw = prefs.getString('security.scope');
+  if (raw == null) return SecurityScope();
+  try {
+    return SecurityScope.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+  } catch (_) {
+    return SecurityScope();
+  }
+}
+
+Future<void> saveSecurityScope(SecurityScope s) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setString('security.scope', jsonEncode(s.toJson()));
+}
+
+/// First-run default whitelist (~/Downloads + ~/Documents), applied once
+/// — afterwards the stored scope is authoritative, including "empty".
+Future<SecurityScope> loadSecurityScopeOrSeed() async {
+  final s = await loadSecurityScope();
+  final prefs = await SharedPreferences.getInstance();
+  if ((prefs.getBool('security.seeded') ?? false) || s.dirs.isNotEmpty) {
+    return s;
+  }
+  await prefs.setBool('security.seeded', true);
+  final home =
+      Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
+  if (home != null) {
+    for (final d in ['$home/Downloads', '$home/Documents']) {
+      if (Directory(d).existsSync()) s.dirs.add(d);
+    }
+    if (s.dirs.isNotEmpty) await saveSecurityScope(s);
+  }
+  return s;
+}
