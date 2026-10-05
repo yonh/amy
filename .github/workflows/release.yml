@@ -35,12 +35,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - platform: linux
+            os: ubuntu-22.04
           - platform: macos
             os: macos-latest
           - platform: ios
             os: macos-latest
           - platform: apk
             os: ubuntu-latest
+          - platform: windows
+            os: windows-latest
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -65,6 +69,12 @@ jobs:
             echo "label=$label"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libsecret-1-dev libjsoncpp-dev
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -72,7 +82,7 @@ jobs:
 
       - run: flutter pub get
 
-      - name: Build (macOS / Android)
+      - name: Build (macOS / Android / Linux / Windows)
         if: matrix.platform != 'ios'
         run: >
           flutter build ${{ matrix.platform }} --release
@@ -85,6 +95,15 @@ jobs:
           flutter build ios --release --no-codesign
           --build-name=${{ steps.version.outputs.name }}
           --build-number=${{ steps.version.outputs.number }}
+
+      - name: Package (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          out="${APP_NAME}-${{ steps.version.outputs.label }}-linux-x64"
+          mkdir -p dist
+          cp -R build/linux/x64/release/bundle "dist/$out"
+          tar -C dist -czf "dist/$out.tar.gz" "$out"
+          rm -rf "dist/$out"
 
       - name: Package (macOS)
         if: matrix.platform == 'macos'
@@ -113,6 +132,19 @@ jobs:
           out="${APP_NAME}-${{ steps.version.outputs.label }}-android"
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-release.apk "dist/$out.apk"
+
+      - name: Package (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $out = "$env:APP_NAME-${{ steps.version.outputs.label }}-windows-x64"
+          $release = "build/windows/x64/runner/Release"
+          # Bundle the MSVC runtime so the zip runs on machines without the VC++ redistributable.
+          foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
+            Copy-Item "$env:WINDIR/System32/$dll" $release
+          }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path "$release/*" -DestinationPath "dist/$out.zip"
 
       - uses: actions/upload-artifact@v4
         with:
