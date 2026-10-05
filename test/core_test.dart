@@ -2,11 +2,13 @@ import 'dart:io';
 
 import 'package:amy/core/ai_brain.dart';
 import 'package:amy/core/files.dart';
+import 'package:amy/core/identity.dart';
 import 'package:amy/core/llm.dart';
 import 'package:amy/core/models.dart';
 import 'package:path/path.dart' as p;
 import 'package:amy/core/protocol.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   group('pairCode', () {
@@ -171,6 +173,48 @@ void main() {
       expect(parseBrainAction('{"foo":1}'), isNull);
       expect(parseBrainAction('没有文件可以发'), isNull);
       expect(parseBrainAction('{broken'), isNull);
+    });
+  });
+
+  // Secure storage has no method-channel host under flutter_test, so
+  // these exercise the plaintext fallback path — credentials must
+  // round-trip, never be lost.
+  group('secret persistence fallback', () {
+    test('LlmConfig apiKey round-trips', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues({});
+      await saveLlmConfig(LlmConfig(
+          baseUrl: 'https://x.test', apiKey: 'sk-secret', model: 'm-1'));
+      final c = await loadLlmConfig();
+      expect(c.apiKey, 'sk-secret');
+      expect(c.baseUrl, 'https://x.test');
+      expect(c.model, 'm-1');
+    });
+
+    test('AiPolicy remoteToken round-trips', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues({});
+      final p = AiPolicy()
+        ..mode = AiMode.auto
+        ..remoteToken = 'tok-123';
+      await saveAiPolicy(p);
+      final r = await loadAiPolicy();
+      expect(r.remoteToken, 'tok-123');
+      expect(r.mode, AiMode.auto);
+    });
+
+    test('corrupt remoteTokens prefs degrades to empty, never throws',
+        () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      // Non-string map values — a lazy cast would survive decode then
+      // throw at migration-encode time, outside the guard.
+      SharedPreferences.setMockInitialValues(
+          {'flutter.ai.remoteTokens': '{"fp1":42,"fp2":"tok"}'});
+      expect(await loadRemoteTokens(), isEmpty);
+      // Non-map payload as well.
+      SharedPreferences.setMockInitialValues(
+          {'flutter.ai.remoteTokens': '12345'});
+      expect(await loadRemoteTokens(), isEmpty);
     });
   });
 }
