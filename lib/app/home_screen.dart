@@ -57,7 +57,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final threePane = MediaQuery.of(context).size.width >= 1080;
     final nearby = ref.watch(nearbyProvider);
     final threaded = ref.watch(threadedPeersProvider);
-    final scanning = nearby.isEmpty;
 
     return Scaffold(
       key: _scaffoldKey,
@@ -77,7 +76,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   SizedBox(
                     width: 320,
-                    child: _deviceList(nearby, threaded, scanning),
+                    child: _deviceList(nearby, threaded),
                   ),
                   const VerticalDivider(width: 1),
                   // Three fixed panes only fit once there's real room —
@@ -107,7 +106,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   ],
                 ],
               )
-            : _deviceList(nearby, threaded, scanning),
+            : _deviceList(nearby, threaded),
       ),
     );
   }
@@ -125,7 +124,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
-  Widget _deviceList(List<Peer> nearby, List<Peer> threaded, bool scanning) {
+  Widget _deviceList(List<Peer> nearby, List<Peer> threaded) {
     final wide = MediaQuery.of(context).size.width >= 720;
     return Column(
       children: [
@@ -189,31 +188,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    if (scanning) ...[
-                      SizedBox(
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: AmyTheme.accent.withValues(alpha: 0.6),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        '搜索中…',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey.shade500,
-                        ),
-                      ),
-                    ] else
-                      Text(
-                        '${nearby.length} 台在线',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey.shade500,
-                        ),
-                      ),
+                    _scanStatus(nearby.length),
                   ],
                 ),
               ),
@@ -236,6 +211,54 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  /// Scan status + manual refresh: discovery runs one pass at launch and
+  /// afterwards only when the user asks for it.
+  Widget _scanStatus(int online) {
+    final discovery = ref.watch(engineProvider).discovery;
+    return StreamBuilder<bool>(
+      stream: discovery.scanningStream,
+      initialData: discovery.scanning,
+      builder: (context, snap) {
+        final busy = snap.data ?? false;
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (busy) ...[
+              SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: AmyTheme.accent.withValues(alpha: 0.6),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                '搜索中…',
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+              ),
+            ] else
+              Text(
+                '$online 台在线',
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+              ),
+            SizedBox(
+              width: 30,
+              height: 30,
+              child: IconButton(
+                iconSize: 16,
+                padding: EdgeInsets.zero,
+                icon: const Icon(Icons.refresh),
+                tooltip: '重新搜索',
+                onPressed: busy ? null : discovery.scanNow,
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 

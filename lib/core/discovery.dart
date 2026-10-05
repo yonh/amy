@@ -28,9 +28,15 @@ class DiscoveryService {
 
   BonsoirBroadcast? _broadcast;
   BonsoirDiscovery? _discovery;
-  Timer? _scanTimer;
+  Timer? _discoveryStopTimer;
   bool _scanning = false;
   bool _started = false;
+  final _scanController = StreamController<bool>.broadcast();
+
+  /// Whether a subnet sweep is in flight — drives the refresh spinner.
+  bool get scanning => _scanning;
+
+  Stream<bool> get scanningStream => _scanController.stream;
 
   /// First non-loopback IPv4 address — used for QR/manual connect hints.
   static Future<String?> primaryIpv4() async {
@@ -56,10 +62,49 @@ class DiscoveryService {
     if (_started) return;
     _started = true;
     await _startBonsoir();
-    // Scan once soon, then periodically — cheap and catches peers mDNS misses.
+    // One scan pass at launch. After that, discovery is manual: the
+    // refresh button calls [scanNow], no continuous searching.
     unawaited(Future.delayed(const Duration(seconds: 2), scanLocalSubnets));
-    _scanTimer = Timer.periodic(const Duration(seconds: 45), (_) {
-      unawaited(scanLocalSubnets());
+    _armDiscoveryStop(const Duration(seconds: 15));
+  }
+
+  /// Manual refresh: re-open the mDNS listener for a short window and
+  /// sweep the subnets once, then shut the listener back down.
+  Future<void> scanNow() async {
+    if (_discovery == null && _started) {
+      try {
+        final d = BonsoirDiscovery(type: kBonsoirType);
+        await d.initialize();
+        _wireDiscovery(d);
+        await d.start();
+        _discovery = d;
+      } catch (_) {}
+    }
+    _armDiscoveryStop(const Duration(seconds: 15));
+    unawaited(scanLocalSubnets());
+  }
+
+  void _armDiscoveryStop(Duration delay) {
+    _discoveryStopTimer?.cancel();
+    _discoveryStopTimer = Timer(delay, () {
+      unawaited(_discovery?.stop());
+      _discovery = null;
+    });
+  }
+
+  void _wireDiscovery(BonsoirDiscovery d) {
+    d.eventStream!.listen((event) {
+      switch (event) {
+        case BonsoirDiscoveryServiceFoundEvent(service: final s):
+          d.serviceResolver.resolveService(s);
+        case BonsoirDiscoveryServiceResolvedEvent(service: final s):
+          unawaited(_handleResolved(s));
+        case BonsoirDiscoveryServiceUpdatedEvent(service: final s):
+          unawaited(_handleResolved(s));
+        case BonsoirDiscoveryServiceLostEvent(service: final s):
+          _markGone(s);
+        default:
+      }
     });
   }
 
@@ -85,22 +130,11 @@ class DiscoveryService {
     }
 
     try {
-      _discovery = BonsoirDiscovery(type: kBonsoirType);
-      await _discovery!.initialize();
-      _discovery!.eventStream!.listen((event) {
-        switch (event) {
-          case BonsoirDiscoveryServiceFoundEvent(service: final s):
-            _discovery!.serviceResolver.resolveService(s);
-          case BonsoirDiscoveryServiceResolvedEvent(service: final s):
-            unawaited(_handleResolved(s));
-          case BonsoirDiscoveryServiceUpdatedEvent(service: final s):
-            unawaited(_handleResolved(s));
-          case BonsoirDiscoveryServiceLostEvent(service: final s):
-            _markGone(s);
-          default:
-        }
-      });
-      await _discovery!.start();
+      final d = BonsoirDiscovery(type: kBonsoirType);
+      await d.initialize();
+      _wireDiscovery(d);
+      await d.start();
+      _discovery = d;
     } catch (_) {
       _discovery = null;
     }
@@ -212,6 +246,7 @@ class DiscoveryService {
   Future<void> scanLocalSubnets() async {
     if (_scanning) return;
     _scanning = true;
+    _scanController.add(true);
     try {
       await _revalidateKnown();
       final subnets = await _localSubnets();
@@ -230,6 +265,7 @@ class DiscoveryService {
       await Future.wait(jobs);
     } finally {
       _scanning = false;
+      _scanController.add(false);
     }
   }
 
@@ -314,7 +350,8 @@ class DiscoveryService {
     final completer = Completer<Peer?>();
     _pendingVerifyCode = code;
     _pendingCodeCompleter = completer;
-    unawaited(scanLocalSubnets());
+    // scanNow also re-opens the mDNS listener if its window has closed.
+    unawaited(scanNow());
     final peer = await completer.future
         .timeout(const Duration(seconds: 20), onTimeout: () => null);
     if (_pendingVerifyCode == code) {
@@ -380,7 +417,7 @@ class DiscoveryService {
   }
 
   Future<void> dispose() async {
-    _scanTimer?.cancel();
+    _discoveryStopTimer?.cancel();
     try {
       await _broadcast?.stop();
     } catch (_) {}
@@ -389,5 +426,6 @@ class DiscoveryService {
     } catch (_) {}
     _http.close();
     await _peersController.close();
+    await _scanController.close();
   }
 }
