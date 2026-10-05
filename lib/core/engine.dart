@@ -6,9 +6,11 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p2;
 
 import 'agent_api.dart';
+import 'ai_brain.dart';
 import 'discovery.dart';
 import 'files.dart' as files;
 import 'identity.dart';
+import 'llm.dart';
 import 'models.dart';
 import 'protocol.dart';
 import 'server.dart';
@@ -73,6 +75,12 @@ class TransferEngine extends ChangeNotifier {
   /// revert to unverifiable, which fails closed under strict mode.
   final stagedSources = <String, String>{};
 
+  /// In-app AI assistant endpoint (OpenAI-compatible, persisted).
+  LlmConfig llmConfig = LlmConfig();
+
+  /// Natural-language assistant driving the same gated agent paths.
+  late final AiBrain brain = AiBrain(this);
+
   /// Pending AI/agent actions awaiting the user's tap.
   final _approvals = <String, AgentAction>{};
 
@@ -105,6 +113,7 @@ class TransferEngine extends ChangeNotifier {
     aiPolicy = await loadAiPolicy();
     _remoteTokens = await loadRemoteTokens();
     securityScope = await loadSecurityScopeOrSeed();
+    llmConfig = await loadLlmConfig();
     identity.agentCapable = aiPolicy.allowRemoteControl;
     _agentToken = randomId(16);
     unawaited(_writeAgentEndpoint());
@@ -271,6 +280,13 @@ class TransferEngine extends ChangeNotifier {
   Future<void> _dispatchPlan(SendPlan p, Peer peer) async {
     try {
       if (p.agentCreated) {
+        // AI mode off kills agent plans outright — a plan queued earlier
+        // must not fire after the user switched automation off.
+        if (aiPolicy.mode == AiMode.off) {
+          p.status = PlanStatus.failed;
+          p.error = 'AI 模式已关闭';
+          return;
+        }
         final denied = <String>[];
         final staging = canonPath((await files.stagingDir()).path) ?? '';
         for (final x in p.filePaths) {
@@ -287,19 +303,36 @@ class TransferEngine extends ChangeNotifier {
             denied.add(x.split(Platform.pathSeparator).last);
           }
         }
-        if (denied.isNotEmpty) {
-          final total = p.filePaths
-              .fold(0, (s, x) => s + File(x).lengthSync());
-          final ok = !securityScope.strict &&
-              await agentApprove(
-                  'plan',
-                  '计划发送含白名单外文件: ${denied.join(', ')}',
-                  total,
-                  remote: false,
-                  forceConfirm: true);
-          if (!ok) {
+        final total =
+            p.filePaths.fold(0, (s, x) => s + File(x).lengthSync());
+        // In auto mode the size cap applies to the ACTUAL dispatch, not
+        // just plan creation — use the 'send' kind so agentApprove counts
+        // it against autoApproveBytes. Out-of-scope still forces a card.
+        final needsCard = denied.isNotEmpty ||
+            (aiPolicy.mode == AiMode.auto &&
+                total > aiPolicy.autoApproveBytes);
+        if (denied.isNotEmpty && securityScope.strict) {
+          p.status = PlanStatus.failed;
+          p.error = '安全隔离:文件不在允许目录内: ${denied.first}';
+          return;
+        }
+        if (needsCard) {
+          final ok = await agentApprove(
+              'send',
+              denied.isNotEmpty
+                  ? '计划发送含白名单外文件: ${denied.join(', ')}'
+                  : '计划发送超过自动批准大小: '
+                      '${p.filePaths.map((x) => x.split(Platform.pathSeparator).last).join(', ')} '
+                      '→ ${peer.alias}',
+              total,
+              remote: false,
+              forceConfirm: denied.isNotEmpty);
+          // The policy may have been switched off while the card waited.
+          if (!ok || aiPolicy.mode == AiMode.off) {
             p.status = PlanStatus.failed;
-            p.error = '安全隔离:文件不在允许目录内: ${denied.first}';
+            p.error = denied.isNotEmpty
+                ? '安全隔离:文件不在允许目录内: ${denied.first}'
+                : '未批准或 AI 模式已关闭';
             return;
           }
         }
@@ -309,6 +342,13 @@ class TransferEngine extends ChangeNotifier {
       if (p.status != PlanStatus.pending) return;
       final pe = peers[p.peerFingerprint];
       if (pe == null || !pe.online) return;
+      // The mode-off check at dispatch start can be stale by now —
+      // re-check so switching AI off mid-flight still stops the send.
+      if (p.agentCreated && aiPolicy.mode == AiMode.off) {
+        p.status = PlanStatus.failed;
+        p.error = 'AI 模式已关闭';
+        return;
+      }
       final tf = [
         for (final x in p.filePaths)
           TransferFile(
@@ -390,6 +430,13 @@ class TransferEngine extends ChangeNotifier {
   Future<void> setSecurityScope(SecurityScope s) async {
     securityScope = s;
     await saveSecurityScope(s);
+    notifyListeners();
+  }
+
+  /// Saves the AI assistant endpoint config.
+  Future<void> setLlmConfig(LlmConfig c) async {
+    llmConfig = c;
+    await saveLlmConfig(c);
     notifyListeners();
   }
 
