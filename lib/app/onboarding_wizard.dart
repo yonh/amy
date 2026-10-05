@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -42,6 +44,7 @@ class _WizardOnboardingState extends ConsumerState<WizardOnboarding> {
     if (alias.isNotEmpty) {
       ref.read(identityProvider).alias = alias;
       await saveAlias(alias);
+      unawaited(ref.read(engineProvider).discovery.rebroadcast());
     }
     await markOnboarded();
     if (mounted) Navigator.of(context).pop();

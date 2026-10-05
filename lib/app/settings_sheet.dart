@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -48,6 +50,7 @@ class _SettingsSheetState extends ConsumerState<SettingsSheet> {
     final identity = ref.read(identityProvider);
     identity.alias = alias;
     await saveAlias(alias);
+    unawaited(ref.read(engineProvider).discovery.rebroadcast());
     if (mounted) {
       Navigator.of(context).pop();
       ScaffoldMessenger.of(context).showSnackBar(

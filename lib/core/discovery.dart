@@ -112,6 +112,20 @@ class DiscoveryService {
   }
 
   Future<void> _startBonsoir() async {
+    await _startBroadcast();
+
+    try {
+      final d = BonsoirDiscovery(type: kBonsoirType);
+      await d.initialize();
+      _wireDiscovery(d);
+      await d.start();
+      _discovery = d;
+    } catch (_) {
+      _discovery = null;
+    }
+  }
+
+  Future<void> _startBroadcast() async {
     try {
       _broadcast = BonsoirBroadcast(
         service: BonsoirService(
@@ -131,16 +145,17 @@ class DiscoveryService {
     } catch (_) {
       _broadcast = null;
     }
+  }
 
+  /// Re-announce on mDNS after the device alias changed — the original
+  /// broadcast keeps advertising the old name until it is restarted.
+  Future<void> rebroadcast() async {
+    if (!_started) return;
     try {
-      final d = BonsoirDiscovery(type: kBonsoirType);
-      await d.initialize();
-      _wireDiscovery(d);
-      await d.start();
-      _discovery = d;
-    } catch (_) {
-      _discovery = null;
-    }
+      await _broadcast?.stop();
+    } catch (_) {}
+    _broadcast = null;
+    await _startBroadcast();
   }
 
   Future<void> _handleResolved(BonsoirService service) async {
