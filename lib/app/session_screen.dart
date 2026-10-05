@@ -82,14 +82,22 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   Widget build(BuildContext context) {
     ref.watch(engineProvider); // rebuild on any transfer update
     final peer = _peer;
-    final thread = ref.read(engineProvider).threadFor(peer.fingerprint);
+    final engine = ref.read(engineProvider);
+    final thread = engine.threadFor(peer.fingerprint);
+    // Pending scheduled sends for this peer render as plan bubbles inline
+    // — a scheduled message is still a message the user sent.
+    final pendingPlans = engine.plans
+        .where((p) =>
+            p.peerFingerprint == peer.fingerprint &&
+            p.status == PlanStatus.pending)
+        .toList();
 
     final body = Column(
       children: [
         _header(peer),
         const Divider(height: 1),
         Expanded(
-          child: thread.isEmpty
+          child: thread.isEmpty && pendingPlans.isEmpty
               ? Center(
                   child: Text(
                     '还没有传过文件\n用下面的回形针发第一条',
@@ -97,18 +105,38 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                     style: TextStyle(color: Colors.grey.shade500),
                   ),
                 )
-              : ListView.builder(
-                  padding: const EdgeInsets.all(16),
-                  itemCount: thread.length,
-                  itemBuilder: (ctx, i) => _Bubble(
-                    msg: thread[i],
-                    onAnswer: (accept) => ref
-                        .read(engineProvider)
-                        .answerOffer(thread[i].id, accept),
-                    onCancel: () =>
-                        ref.read(engineProvider).cancelMessage(thread[i]),
-                  ),
-                ),
+              : Builder(builder: (ctx) {
+                  final items = <Object>[...thread, ...pendingPlans]
+                    ..sort((a, b) => (a is TransferMessage
+                            ? a.createdAt
+                            : (a as SendPlan).createdAt)
+                        .compareTo(b is TransferMessage
+                            ? b.createdAt
+                            : (b as SendPlan).createdAt));
+                  return ListView.builder(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: items.length,
+                    itemBuilder: (ctx, i) {
+                      final it = items[i];
+                      if (it is SendPlan) {
+                        return _PlanBubble(
+                          plan: it,
+                          onCancel: () =>
+                              ref.read(engineProvider).cancelPlan(it.id),
+                        );
+                      }
+                      final msg = it as TransferMessage;
+                      return _Bubble(
+                        msg: msg,
+                        onAnswer: (accept) => ref
+                            .read(engineProvider)
+                            .answerOffer(msg.id, accept),
+                        onCancel: () =>
+                            ref.read(engineProvider).cancelMessage(msg),
+                      );
+                    },
+                  );
+                }),
         ),
         _composer(peer),
       ],
@@ -377,13 +405,9 @@ class _Bubble extends StatelessWidget {
       MessageStatus.waitingApproval => Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const SizedBox(
-              width: 12,
-              height: 12,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-            const SizedBox(width: 8),
-            const Text('等待对方接受…',
+            const Icon(Icons.check, size: 13, color: Colors.black38),
+            const SizedBox(width: 4),
+            const Text('已送达 · 等待对方接受…',
                 style: TextStyle(fontSize: 11, color: Colors.black45)),
             TextButton(
               onPressed: onCancel,
@@ -407,6 +431,10 @@ class _Bubble extends StatelessWidget {
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
+                if (msg.outgoing) ...[
+                  const Icon(Icons.check, size: 13, color: Colors.black38),
+                  const SizedBox(width: 4),
+                ],
                 Text('${(msg.progress * 100).round()}%',
                     style: const TextStyle(
                         fontSize: 11, color: Colors.black54)),
@@ -426,8 +454,12 @@ class _Bubble extends StatelessWidget {
       MessageStatus.done => Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.check, size: 13, color: Colors.black38),
-            const SizedBox(width: 4),
+            // Telegram-style receipt: outgoing shows a double tick once
+            // the peer confirmed receiving; incoming stays plain time.
+            if (msg.outgoing) ...[
+              const Icon(Icons.done_all, size: 13, color: AmyTheme.accent),
+              const SizedBox(width: 4),
+            ],
             Text(time,
                 style:
                     const TextStyle(fontSize: 11, color: Colors.black38)),
@@ -456,6 +488,85 @@ class _Bubble extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Outgoing-aligned bubble for a pending scheduled send — the "plan"
+/// state of the delivery receipt: single tick only once it dispatches
+/// into a real transfer message.
+class _PlanBubble extends StatelessWidget {
+  const _PlanBubble({required this.plan, required this.onCancel});
+
+  final SendPlan plan;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final when = plan.timed
+        ? '定于 ${plan.runAt!.month}/${plan.runAt!.day} '
+            '${plan.runAt!.hour.toString().padLeft(2, '0')}:'
+            '${plan.runAt!.minute.toString().padLeft(2, '0')}'
+        : '设备上线即发';
+    return Align(
+      alignment: Alignment.centerRight,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.all(12),
+        constraints: const BoxConstraints(maxWidth: 300),
+        decoration: BoxDecoration(
+          color: AmyTheme.bubbleMe.withValues(alpha: 0.6),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: AmyTheme.accent.withValues(alpha: 0.25)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (final name in plan.filePaths)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 3),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.insert_drive_file_outlined,
+                        size: 18, color: AmyTheme.accent),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        name.split('/').last,
+                        style: const TextStyle(fontSize: 13),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 6),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.schedule, size: 13,
+                    color: AmyTheme.accent),
+                const SizedBox(width: 4),
+                Flexible(
+                  child: Text('$when · 计划',
+                      style: const TextStyle(
+                          fontSize: 11, color: AmyTheme.accent)),
+                ),
+                TextButton(
+                  onPressed: onCancel,
+                  style: TextButton.styleFrom(
+                    minimumSize: Size.zero,
+                    padding: const EdgeInsets.only(left: 12),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: const Text('取消', style: TextStyle(fontSize: 12)),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
