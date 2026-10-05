@@ -505,7 +505,14 @@ class _Bubble extends StatelessWidget {
       case FileKind.video:
         await showDialog<void>(
           context: context,
-          builder: (_) => _VideoDialog(path: path, title: f.name),
+          builder: (ctx) => _VideoDialog(
+            path: path,
+            title: f.name,
+            onFallback: () {
+              Navigator.of(ctx).pop();
+              unawaited(_openFile(ctx, f));
+            },
+          ),
         );
       default:
         await _openFile(context, f);
@@ -517,8 +524,12 @@ class _Bubble extends StatelessWidget {
     if (path == null) return;
     if (Platform.isMacOS || Platform.isWindows || Platform.isLinux) {
       await Process.run(
-        Platform.isMacOS ? 'open' : 'xdg-open',
-        [path],
+        Platform.isMacOS
+            ? 'open'
+            : Platform.isWindows
+                ? 'cmd'
+                : 'xdg-open',
+        Platform.isWindows ? ['/c', 'start', '', path] : [path],
       );
     } else {
       await SharePlus.instance.share(ShareParams(files: [XFile(path)]));
@@ -546,13 +557,22 @@ class _Bubble extends StatelessWidget {
             ),
           ],
         ),
-      MessageStatus.sending => const Row(
+      MessageStatus.sending => Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.schedule, size: 13, color: Colors.black38),
-            SizedBox(width: 4),
-            Text('发送中…',
+            const Icon(Icons.schedule, size: 13, color: Colors.black38),
+            const SizedBox(width: 4),
+            const Text('发送中…',
                 style: TextStyle(fontSize: 11, color: Colors.black45)),
+            if (msg.outgoing) ...[
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: onCancel,
+                child: const Text('取消',
+                    style:
+                        TextStyle(fontSize: 11, color: AmyTheme.accent)),
+              ),
+            ],
           ],
         ),
       MessageStatus.waitingApproval => Row(
@@ -727,10 +747,19 @@ class _PlanBubble extends StatelessWidget {
 /// In-app video preview — plays the file inline instead of bouncing out
 /// to a system player.
 class _VideoDialog extends StatefulWidget {
-  const _VideoDialog({required this.path, required this.title});
+  const _VideoDialog({
+    required this.path,
+    required this.title,
+    required this.onFallback,
+  });
 
   final String path;
   final String title;
+
+  /// Called when in-app playback isn't available (e.g. Windows/Linux,
+  /// where no video_player implementation is registered) — opens the
+  /// file with the system player instead.
+  final VoidCallback onFallback;
 
   @override
   State<_VideoDialog> createState() => _VideoDialogState();
@@ -740,6 +769,7 @@ class _VideoDialogState extends State<_VideoDialog> {
   late final VideoPlayerController _c =
       VideoPlayerController.file(File(widget.path));
   bool _ready = false;
+  bool _failed = false;
 
   @override
   void initState() {
@@ -748,7 +778,9 @@ class _VideoDialogState extends State<_VideoDialog> {
       if (!mounted) return;
       setState(() => _ready = true);
       unawaited(_c.play());
-    }).catchError((_) {});
+    }).catchError((_) {
+      if (mounted) setState(() => _failed = true);
+    });
   }
 
   @override
@@ -765,12 +797,28 @@ class _VideoDialogState extends State<_VideoDialog> {
       child: Stack(
         children: [
           Center(
-            child: !_ready
-                ? const CircularProgressIndicator()
-                : AspectRatio(
-                    aspectRatio: _c.value.aspectRatio,
-                    child: VideoPlayer(_c),
-                  ),
+            child: _failed
+                ? Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.videocam_off_outlined,
+                          color: Colors.white54, size: 40),
+                      const SizedBox(height: 12),
+                      const Text('当前平台不支持内置播放',
+                          style: TextStyle(color: Colors.white70)),
+                      TextButton(
+                        onPressed: widget.onFallback,
+                        child: const Text('用系统应用打开',
+                            style: TextStyle(color: AmyTheme.accent)),
+                      ),
+                    ],
+                  )
+                : !_ready
+                    ? const CircularProgressIndicator()
+                    : AspectRatio(
+                        aspectRatio: _c.value.aspectRatio,
+                        child: VideoPlayer(_c),
+                      ),
           ),
           Positioned(
             top: 8,

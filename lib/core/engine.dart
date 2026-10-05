@@ -106,6 +106,7 @@ class TransferEngine extends ChangeNotifier {
       onUploadDone: _uploadDone,
       onSessionEnd: _sessionEnd,
       onPeerInfo: _peerFromInfo,
+      onPeerGate: _peerGate,
       onText: _handleText,
       onAgent: AgentApi(this).handle,
     );
@@ -687,6 +688,7 @@ class TransferEngine extends ChangeNotifier {
           .postUrl(peer.baseUri.replace(path: kPreparePath))
           .timeout(const Duration(seconds: 6));
       req.headers.contentType = ContentType.json;
+      req.headers.add('x-amy-proto', '2');
       req.write(prepareBody);
       // close() resolves when response headers arrive — the peer's
       // server flushes them as soon as the offer is on its screen, so
@@ -698,7 +700,11 @@ class TransferEngine extends ChangeNotifier {
         msg.status = MessageStatus.waitingApproval;
         _persist();
       }
-      final body = await utf8.decodeStream(res);
+      // Same deadline for the body: it waits on the peer's decision
+      // and would otherwise hang forever if they vanish mid-offer.
+      final body = await utf8
+          .decodeStream(res)
+          .timeout(kOfferClientTimeout);
       if (send.cancelled) return;
       final j = jsonDecode(body) as Map<String, dynamic>;
       if (res.statusCode != 200 || j['accepted'] != true) {
@@ -794,6 +800,18 @@ class TransferEngine extends ChangeNotifier {
 
   Peer _peerFromInfo(Map<String, dynamic> info, InternetAddress remote) {
     return discovery.learnPeer(info, remote.address);
+  }
+
+  /// Anti-spoofing gate for endpoints that write state (prepare/text):
+  /// a fingerprint we already discovered ONLINE at a different address
+  /// can't legitimately arrive from another IP — a LAN client claiming
+  /// it is forging. Unknown or offline fingerprints pass: there is no
+  /// baseline to distrust, matching the existing trust model.
+  bool _peerGate(Map<String, dynamic> info, InternetAddress remote) {
+    final fp = info['fingerprint'] as String?;
+    if (fp == null) return true;
+    final known = discovery.peers[fp];
+    return known == null || !known.online || known.host == remote.address;
   }
 
   /// Chat text from a peer — lands straight in the thread, no accept

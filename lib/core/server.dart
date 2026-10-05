@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'agent_api.dart';
 import 'identity.dart';
@@ -58,6 +59,14 @@ typedef PeerResolveHandler = Peer Function(
   InternetAddress remote,
 );
 typedef TextHandler = void Function(Peer from, String text);
+
+/// Called BEFORE onPeerInfo on gated endpoints; return false to reject
+/// the request with 403. Lets the engine refuse requests that claim a
+/// fingerprint we already discovered at a different LAN address.
+typedef PeerGateHandler = bool Function(
+  Map<String, dynamic> info,
+  InternetAddress remote,
+);
 typedef AgentHandler = FutureOr<void> Function(HttpRequest request);
 
 /// HTTP server every device runs: discovery info, offer negotiation, and the
@@ -72,6 +81,7 @@ class AmyServer {
     required this.onSessionEnd,
     required this.onPeerInfo,
     required this.onText,
+    this.onPeerGate,
     this.onAgent,
   });
 
@@ -88,6 +98,10 @@ class AmyServer {
   /// Chat text arriving over /api/v1/text — stored straight into the
   /// thread; no accept gate (chat semantics, like any LAN messenger).
   final TextHandler onText;
+
+  /// Optional pre-resolution gate (anti-spoofing) on the endpoints that
+  /// write state: prepare + text.
+  final PeerGateHandler? onPeerGate;
 
   /// Loopback-only agent API (amy_cli / amy_mcp). Receives requests under
   /// /api/v1/agent/*; must write and close the response.
@@ -162,6 +176,10 @@ class AmyServer {
       _json(req, 400, {'error': 'no remote'});
       return;
     }
+    if (!(onPeerGate?.call(fromInfo, remote) ?? true)) {
+      _json(req, 403, {'error': 'peer mismatch'});
+      return;
+    }
     final peer = onPeerInfo(fromInfo, remote);
     final filesJson = j['files'] as List? ?? const [];
     final files = <String, TransferFile>{
@@ -177,15 +195,18 @@ class AmyServer {
     final session = await onPrepare(peer, files);
     sessions[session.id] = session;
 
-    // Flush headers now: once they leave, the sender knows the offer
-    // reached this device (single tick) while we still block on the
-    // receiver's decision. Status stays 200 for both outcomes — the
-    // body's `accepted` flag carries the verdict. Older peers reply
-    // only after deciding; new senders just skip the waiting phase.
-    req.response
-      ..statusCode = 200
-      ..headers.contentType = ContentType.json;
-    await req.response.flush();
+    // Protocol v2 senders (x-amy-proto: 2) get response headers flushed
+    // as soon as the offer is on screen — that's their "delivered" tick.
+    // Both outcomes then stay 200; the body's `accepted` carries the
+    // verdict. v1 senders get the legacy single-shot reply: 403 on
+    // decline, 200 on accept (they only read the status code).
+    final v2 = req.headers.value('x-amy-proto') == '2';
+    if (v2) {
+      req.response
+        ..statusCode = 200
+        ..headers.contentType = ContentType.json;
+      await req.response.flush();
+    }
 
     // Block until the user decides, or auto-decline on timeout.
     final accepted = await session.decision.future
@@ -193,15 +214,24 @@ class AmyServer {
     if (!accepted || session.cancelled) {
       sessions.remove(session.id);
       onSessionEnd(session, 'declined');
-      _body(req, {'accepted': false});
+      if (v2) {
+        _body(req, {'accepted': false});
+      } else {
+        _json(req, 403, {'accepted': false});
+      }
       return;
     }
     session.accepted = true;
-    _body(req, {
+    final ok = {
       'accepted': true,
       'sessionId': session.id,
       'files': session.tokens,
-    });
+    };
+    if (v2) {
+      _body(req, ok);
+    } else {
+      _json(req, 200, ok);
+    }
   }
 
   /// Writes a JSON body when headers were already flushed (see _prepare).
@@ -210,16 +240,38 @@ class AmyServer {
     unawaited(req.response.close());
   }
 
+  /// Chat text cap — generous for pasted paragraphs, small enough that
+  /// LAN spam can't exhaust memory or inflate stored history.
+  static const _kMaxTextBytes = 64 * 1024;
+
   Future<void> _text(HttpRequest req) async {
-    final body = await utf8.decodeStream(req);
-    final j = jsonDecode(body) as Map<String, dynamic>? ?? {};
+    final bb = BytesBuilder();
+    var oversized = false;
+    await for (final chunk in req) {
+      bb.add(chunk);
+      if (bb.length > _kMaxTextBytes) {
+        oversized = true;
+        break;
+      }
+    }
+    if (oversized) {
+      _json(req, 413, {'error': 'text too large'});
+      return;
+    }
+    final j =
+        jsonDecode(utf8.decode(bb.takeBytes())) as Map<String, dynamic>? ?? {};
     final text = (j['text'] as String? ?? '').trim();
     final remote = req.connectionInfo?.remoteAddress;
     if (remote == null || text.isEmpty) {
       _json(req, 400, {'error': 'bad text'});
       return;
     }
-    final peer = onPeerInfo(j['from'] as Map<String, dynamic>? ?? {}, remote);
+    final fromInfo = j['from'] as Map<String, dynamic>? ?? {};
+    if (!(onPeerGate?.call(fromInfo, remote) ?? true)) {
+      _json(req, 403, {'error': 'peer mismatch'});
+      return;
+    }
+    final peer = onPeerInfo(fromInfo, remote);
     onText(peer, text);
     _json(req, 200, {'ok': true});
   }
