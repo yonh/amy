@@ -106,6 +106,7 @@ class TransferEngine extends ChangeNotifier {
       onUploadDone: _uploadDone,
       onSessionEnd: _sessionEnd,
       onPeerInfo: _peerFromInfo,
+      onText: _handleText,
       onAgent: AgentApi(this).handle,
     );
     identity.port = await server.start();
@@ -192,6 +193,51 @@ class TransferEngine extends ChangeNotifier {
     final send = _OutgoingSend(peer: peer, message: msg);
     _outgoing[msg.id] = send;
     unawaited(_runSend(send));
+    return msg;
+  }
+
+  /// Sends a chat text. No accept gate on the receiver — the POST itself
+  /// is the delivery: 200 means the peer stored the bubble, so the
+  /// message goes straight to done (double tick) once acked.
+  Future<TransferMessage> sendText(Peer peer, String text) async {
+    final trimmed = text.trim();
+    final msg = TransferMessage(
+      id: randomId(),
+      peerId: peer.fingerprint,
+      outgoing: true,
+      files: const [],
+      status: MessageStatus.waitingApproval,
+      text: trimmed,
+    );
+    _addMessage(msg);
+    unawaited(() async {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 6);
+      try {
+        final req = await client
+            .postUrl(peer.baseUri.replace(path: kTextPath))
+            .timeout(const Duration(seconds: 6));
+        req.headers.contentType = ContentType.json;
+        req.write(jsonEncode({
+          'from': identity.infoJson(),
+          'text': trimmed,
+        }));
+        final res = await req.close().timeout(const Duration(seconds: 10));
+        await res.drain<void>();
+        if (res.statusCode == 200) {
+          msg.status = MessageStatus.done;
+        } else {
+          msg.status = MessageStatus.failed;
+          msg.error = '对方返回 ${res.statusCode}';
+        }
+      } catch (e) {
+        msg.status = MessageStatus.failed;
+        msg.error = '$e';
+      } finally {
+        client.close(force: true);
+        _persist();
+      }
+    }());
     return msg;
   }
 
@@ -739,6 +785,19 @@ class TransferEngine extends ChangeNotifier {
 
   Peer _peerFromInfo(Map<String, dynamic> info, InternetAddress remote) {
     return discovery.learnPeer(info, remote.address);
+  }
+
+  /// Chat text from a peer — lands straight in the thread, no accept
+  /// gate (the sender already consented by sending).
+  void _handleText(Peer from, String text) {
+    _addMessage(TransferMessage(
+      id: randomId(),
+      peerId: from.fingerprint,
+      outgoing: false,
+      files: const [],
+      status: MessageStatus.done,
+      text: text,
+    ));
   }
 
   /// Called by the server when a peer offers files. Creates the incoming

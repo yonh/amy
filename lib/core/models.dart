@@ -296,6 +296,7 @@ class TransferMessage {
     required this.status,
     DateTime? createdAt,
     this.error,
+    this.text,
   }) : createdAt = createdAt ?? DateTime.now();
 
   final String id;
@@ -304,6 +305,10 @@ class TransferMessage {
   final String peerId;
   final bool outgoing;
   final List<TransferFile> files;
+
+  /// Chat text body — null for file offers. A text message has no files
+  /// and skips the accept gate entirely.
+  final String? text;
   MessageStatus status;
   final DateTime createdAt;
   String? error;
@@ -336,6 +341,7 @@ class TransferMessage {
         'status': status.name,
         'createdAt': createdAt.toIso8601String(),
         if (error != null) 'error': error,
+        if (text != null) 'text': text,
       };
 
   factory TransferMessage.fromJson(Map<String, dynamic> j) => TransferMessage(
@@ -349,6 +355,7 @@ class TransferMessage {
             .firstWhere((s) => s.name == j['status'], orElse: () => MessageStatus.failed),
         createdAt: DateTime.tryParse(j['createdAt'] as String? ?? ''),
         error: j['error'] as String?,
+        text: j['text'] as String?,
       );
 }
 

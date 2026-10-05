@@ -57,6 +57,7 @@ typedef PeerResolveHandler = Peer Function(
   Map<String, dynamic> info,
   InternetAddress remote,
 );
+typedef TextHandler = void Function(Peer from, String text);
 typedef AgentHandler = FutureOr<void> Function(HttpRequest request);
 
 /// HTTP server every device runs: discovery info, offer negotiation, and the
@@ -70,6 +71,7 @@ class AmyServer {
     required this.onUploadDone,
     required this.onSessionEnd,
     required this.onPeerInfo,
+    required this.onText,
     this.onAgent,
   });
 
@@ -82,6 +84,10 @@ class AmyServer {
 
   /// Resolves an /prepare-upload `from` block into a [Peer] the engine tracks.
   final PeerResolveHandler onPeerInfo;
+
+  /// Chat text arriving over /api/v1/text — stored straight into the
+  /// thread; no accept gate (chat semantics, like any LAN messenger).
+  final TextHandler onText;
 
   /// Loopback-only agent API (amy_cli / amy_mcp). Receives requests under
   /// /api/v1/agent/*; must write and close the response.
@@ -125,6 +131,8 @@ class AmyServer {
         await _upload(req);
       } else if (req.method == 'POST' && path == kCancelPath) {
         _cancel(req);
+      } else if (req.method == 'POST' && path == kTextPath) {
+        await _text(req);
       } else if (req.method == 'POST' && path == kVerifyCodePath) {
         await _verifyCode(req);
       } else if (path.startsWith(AgentApi.prefix)) {
@@ -184,6 +192,20 @@ class AmyServer {
       'sessionId': session.id,
       'files': session.tokens,
     });
+  }
+
+  Future<void> _text(HttpRequest req) async {
+    final body = await utf8.decodeStream(req);
+    final j = jsonDecode(body) as Map<String, dynamic>? ?? {};
+    final text = (j['text'] as String? ?? '').trim();
+    final remote = req.connectionInfo?.remoteAddress;
+    if (remote == null || text.isEmpty) {
+      _json(req, 400, {'error': 'bad text'});
+      return;
+    }
+    final peer = onPeerInfo(j['from'] as Map<String, dynamic>? ?? {}, remote);
+    onText(peer, text);
+    _json(req, 200, {'ok': true});
   }
 
   Future<void> _upload(HttpRequest req) async {
