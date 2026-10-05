@@ -66,7 +66,20 @@ class LlmClient {
   HttpClient _newHttp() =>
       HttpClient()..connectionTimeout = const Duration(seconds: 10);
 
-  Uri get _base => Uri.parse(config.baseUrl.trim().replaceAll(RegExp(r'/+$'), ''));
+  /// The API key and the absolute file paths the brain sees ride in
+  /// every request — only ever send them over TLS or to loopback (a
+  /// local dev proxy is the one legitimate plaintext case).
+  Uri get _base {
+    final u =
+        Uri.parse(config.baseUrl.trim().replaceAll(RegExp(r'/+$'), ''));
+    final loopback = const {'localhost', '127.0.0.1', '::1', '[::1]'}
+        .contains(u.host.toLowerCase());
+    if (u.scheme != 'https' && !loopback) {
+      throw LlmException(
+          'AI 大脑地址必须用 https（明文 http 会泄露密钥和文件路径）');
+    }
+    return u;
+  }
 
   /// Returns the assistant message content. Reasoning models may also
   /// emit `reasoning_content` — callers only need [content].

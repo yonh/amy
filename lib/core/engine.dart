@@ -280,6 +280,13 @@ class TransferEngine extends ChangeNotifier {
   Future<void> _dispatchPlan(SendPlan p, Peer peer) async {
     try {
       if (p.agentCreated) {
+        // AI mode off kills agent plans outright — a plan queued earlier
+        // must not fire after the user switched automation off.
+        if (aiPolicy.mode == AiMode.off) {
+          p.status = PlanStatus.failed;
+          p.error = 'AI 模式已关闭';
+          return;
+        }
         final denied = <String>[];
         final staging = canonPath((await files.stagingDir()).path) ?? '';
         for (final x in p.filePaths) {
@@ -296,19 +303,34 @@ class TransferEngine extends ChangeNotifier {
             denied.add(x.split(Platform.pathSeparator).last);
           }
         }
-        if (denied.isNotEmpty) {
-          final total = p.filePaths
-              .fold(0, (s, x) => s + File(x).lengthSync());
-          final ok = !securityScope.strict &&
-              await agentApprove(
-                  'plan',
-                  '计划发送含白名单外文件: ${denied.join(', ')}',
-                  total,
-                  remote: false,
-                  forceConfirm: true);
-          if (!ok) {
+        final total =
+            p.filePaths.fold(0, (s, x) => s + File(x).lengthSync());
+        // In auto mode the size cap applies to the ACTUAL dispatch, not
+        // just plan creation — use the 'send' kind so agentApprove counts
+        // it against autoApproveBytes. Out-of-scope still forces a card.
+        final needsCard = denied.isNotEmpty ||
+            (aiPolicy.mode == AiMode.auto &&
+                total > aiPolicy.autoApproveBytes);
+        if (denied.isNotEmpty && securityScope.strict) {
+          p.status = PlanStatus.failed;
+          p.error = '安全隔离:文件不在允许目录内: ${denied.first}';
+          return;
+        }
+        if (needsCard) {
+          final ok = await agentApprove(
+              'send',
+              denied.isNotEmpty
+                  ? '计划发送含白名单外文件: ${denied.join(', ')}'
+                  : '计划发送超过自动批准大小',
+              total,
+              remote: false,
+              forceConfirm: denied.isNotEmpty);
+          // The policy may have been switched off while the card waited.
+          if (!ok || aiPolicy.mode == AiMode.off) {
             p.status = PlanStatus.failed;
-            p.error = '安全隔离:文件不在允许目录内: ${denied.first}';
+            p.error = denied.isNotEmpty
+                ? '安全隔离:文件不在允许目录内: ${denied.first}'
+                : '未批准或 AI 模式已关闭';
             return;
           }
         }

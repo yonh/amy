@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../state/providers.dart';
+import 'approvals_card.dart';
 import 'settings_sheet.dart';
 import 'theme.dart';
 
@@ -50,7 +51,12 @@ class _AiSheetState extends ConsumerState<AiSheet> {
       _busy = true;
       _input.clear();
     });
-    final reply = await ref.read(engineProvider).brain.run(text);
+    String reply;
+    try {
+      reply = await ref.read(engineProvider).brain.run(text);
+    } catch (e) {
+      reply = '出错了: $e';
+    }
     if (!mounted) return;
     setState(() {
       _entries.add(_Entry(false, reply));
@@ -83,6 +89,10 @@ class _AiSheetState extends ConsumerState<AiSheet> {
             style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
           ),
           const SizedBox(height: 10),
+          // The sheet is modal and would otherwise block the approval
+          // card on the home screen — mirror it here so the user can
+          // approve the very send this conversation is waiting on.
+          const AgentApprovals(),
           ConstrainedBox(
             constraints: const BoxConstraints(maxHeight: 320, minHeight: 80),
             child: _entries.isEmpty
